@@ -1,12 +1,20 @@
 import express from 'express';
 import cors from 'cors';
 import { pool } from './config/db.js';
+import referenceRouter from './routes/reference.js';
 
 export function createApp() {
   const app = express();
 
-  app.use(cors());
+  app.use(cors(
+    {
+      origin: ["http://localhost:5173", "http://localhost:5174"],
+      credentials: true,
+    }
+  ));
   app.use(express.json());
+
+  app.use('/reference', referenceRouter);
 
   app.get('/health', (req, res) => {
     res.json({ status: 'ok', service: 'cirkle-backend' });

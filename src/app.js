@@ -5,6 +5,7 @@ import referenceRouter from './routes/reference.js';
 import authRouter from './routes/auth.js';
 import onboardingRouter from './routes/onboarding.js';
 import profileRouter from './routes/profile.js';
+import eventsRouter from './routes/events.js';
 
 export function createApp() {
   const app = express();
@@ -21,6 +22,7 @@ export function createApp() {
   app.use('/auth', authRouter);
   app.use('/onboarding', onboardingRouter);
   app.use('/profile', profileRouter);
+  app.use('/events', eventsRouter);
 
   app.get('/health', (req, res) => {
     res.json({ status: 'ok', service: 'cirkle-backend' });

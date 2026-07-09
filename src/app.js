@@ -4,6 +4,7 @@ import { pool } from './config/db.js';
 import referenceRouter from './routes/reference.js';
 import authRouter from './routes/auth.js';
 import onboardingRouter from './routes/onboarding.js';
+import profileRouter from './routes/profile.js';
 
 export function createApp() {
   const app = express();
@@ -19,6 +20,7 @@ export function createApp() {
   app.use('/reference', referenceRouter);
   app.use('/auth', authRouter);
   app.use('/onboarding', onboardingRouter);
+  app.use('/profile', profileRouter);
 
   app.get('/health', (req, res) => {
     res.json({ status: 'ok', service: 'cirkle-backend' });

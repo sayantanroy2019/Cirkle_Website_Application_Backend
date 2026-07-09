@@ -210,6 +210,11 @@ onboardingRouter.patch('/step/5', authenticate, async (req, res) => {
         return res.status(400).json({ error: 'Select between 3 and 5 lifestyle tags' });
     }
 
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!lifestyleTagIds.every(id => uuidRegex.test(id))) {
+        return res.status(400).json({ error: 'One or more invalid lifestyle tags' });
+    }
+
     const client = await pool.connect();
 
     try {

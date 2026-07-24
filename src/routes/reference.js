@@ -23,4 +23,14 @@ referenceRouter.get('/lifestyle-tags', async (req, res) => {
   }
 });
 
+referenceRouter.get('/event-categories', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, label FROM event_categories ORDER BY label ASC');
+    res.json({ eventCategories: result.rows });
+  } catch (error) {
+    console.error('Error fetching event categories:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 export default referenceRouter;

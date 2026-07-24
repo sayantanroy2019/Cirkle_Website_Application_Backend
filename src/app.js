@@ -1,5 +1,7 @@
 import express from 'express';
 import cors from 'cors';
+import swaggerUi from 'swagger-ui-express';
+import swaggerSpec from './swagger.js';
 import { pool } from './config/db.js';
 import referenceRouter from './routes/reference.js';
 import authRouter from './routes/auth.js';
@@ -17,6 +19,9 @@ export function createApp() {
     }
   ));
   app.use(express.json());
+
+  // Swagger UI — API documentation
+  app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
   app.use('/reference', referenceRouter);
   app.use('/auth', authRouter);

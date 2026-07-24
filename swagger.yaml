@@ -1,0 +1,845 @@
+openapi: 3.0.0
+
+info:
+  title: Cirkle API
+  version: 1.0.0
+  description: |
+    ## Cirkle — Social Events Platform API
+
+    Cirkle is an AI-native social discovery platform for people to find their tribe and attend events together.
+
+    ### Authentication
+    All endpoints except `GET /cities`, `GET /lifestyle-tags`, and `POST /auth/login` require a Bearer token.
+
+    Include the token in every protected request:
+    Authorization: Bearer <your_jwt_token>
+
+    ### Price Format
+    All prices are in **paise** (₹1 = 100 paise). Example: ₹500 = `50000`.
+
+    ### Phone Format
+    Indian mobile numbers only. Format: `+91XXXXXXXXXX` where the 10-digit number starts with 6, 7, 8, or 9.
+
+servers:
+  - url: http://localhost:3000
+    description: Development server
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Reference
+    description: Static reference data — cities and lifestyle tags. No auth required. Safe to cache on the client.
+  - name: Auth
+    description: Phone-based authentication. One endpoint handles both signup and login.
+  - name: Onboarding
+    description: Seven sequential steps to complete a user profile. All require auth. Steps can be revisited without losing progress.
+  - name: Profile
+    description: View and edit the logged-in user's profile.
+  - name: Events
+    description: Browse and view events. City-filtered by default, overridable via query param.
+
+paths:
+
+  # ─── REFERENCE ────────────────────────────────────────────────────────
+
+  /reference/cities:
+    get:
+      tags: [Reference]
+      summary: Get all cities
+      description: Returns the fixed list of Indian cities. Used in onboarding step 4 (city selection) and the Feed city switcher. No auth required.
+      security: []
+      responses:
+        '200':
+          description: List of cities
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cities:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/City'
+              example:
+                cities:
+                  - id: del
+                    name: Delhi NCR
+                  - id: mum
+                    name: Mumbai
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /reference/lifestyle-tags:
+    get:
+      tags: [Reference]
+      summary: Get all lifestyle tags
+      description: Returns all lifestyle tags ordered by category. Used in onboarding step 5 and Edit Profile. The frontend groups tags by the category field. Min 3, max 5 selectable per user. No auth required.
+      security: []
+      responses:
+        '200':
+          description: List of lifestyle tags
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lifestyleTags:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LifestyleTag'
+              example:
+                lifestyleTags:
+                  - id: be1c46e0-e44b-4776-89fd-e15b97b95fc7
+                    label: Clubbing
+                    category: Going out
+                  - id: 54e18447-c11a-4613-9b18-6e71f8012f2a
+                    label: Gym
+                    category: Active & outdoors
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /reference/event-categories:
+    get:
+      tags: [Reference]
+      summary: Get all event categories
+      description: Returns the fixed list of event categories. Powers the Events-tab filter chips and the `?category=` filter on GET /events. No auth required.
+      security: []
+      responses:
+        '200':
+          description: List of event categories
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  eventCategories:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/EventCategory'
+              example:
+                eventCategories:
+                  - id: club
+                    label: Clubs
+                  - id: concert
+                    label: Concerts
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ─── AUTH ─────────────────────────────────────────────────────────────
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Login or create account
+      description: |
+        Single endpoint for both signup and login — no split. Sends phone number, gets a JWT back.
+
+        - **New user:** creates a user row + empty profile row atomically, returns `isNewUser: true`.
+        - **Returning user:** verifies phone against stored hash, returns `isNewUser: false` with current onboarding progress.
+
+        The frontend uses `isNewUser` + `currentOnboardingStep` to decide where to route the user after login.
+
+        > **Phase 1 stub:** uses phone-as-password (bcrypt). Replaced by real OTP at final phase.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone:
+                  type: string
+                  example: "+919876543210"
+                  description: Indian mobile number with +91 prefix. Must start with 6, 7, 8, or 9.
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    description: JWT valid for 7 days
+                  isNewUser:
+                    type: boolean
+                    description: True if account was just created
+                  currentOnboardingStep:
+                    type: integer
+                    minimum: 0
+                    maximum: 7
+                    description: Which onboarding step to resume at
+                  partialProfileComplete:
+                    type: boolean
+                    description: True if the user can access the Feed
+              example:
+                token: eyJhbGciOiJIUzI1NiJ9...
+                isNewUser: true
+                currentOnboardingStep: 0
+                partialProfileComplete: false
+        '400':
+          description: Invalid phone number format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Invalid phone number
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ─── ONBOARDING ───────────────────────────────────────────────────────
+
+  /onboarding/status:
+    get:
+      tags: [Onboarding]
+      summary: Get onboarding status
+      description: Returns the current onboarding step and Feed access flag for the logged-in user. The frontend calls this on app launch to decide where to route the user — onboarding screen N, or straight to the Feed.
+      responses:
+        '200':
+          description: Current onboarding progress
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  currentOnboardingStep:
+                    type: integer
+                    minimum: 0
+                    maximum: 7
+                  partialProfileComplete:
+                    type: boolean
+              example:
+                currentOnboardingStep: 3
+                partialProfileComplete: false
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /onboarding/step/1:
+    patch:
+      tags: [Onboarding]
+      summary: Step 1 — Save name
+      description: Saves the user's first and last name. Both are required, minimum 2 characters each. Displayed publicly as "FirstName, Age" everywhere on the platform.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [firstName, lastName]
+              properties:
+                firstName:
+                  type: string
+                  minLength: 2
+                  example: Sayantan
+                lastName:
+                  type: string
+                  minLength: 2
+                  example: Roy
+      responses:
+        '200':
+          $ref: '#/components/responses/OnboardingStepSuccess'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /onboarding/step/2:
+    patch:
+      tags: [Onboarding]
+      summary: Step 2 — Save date of birth
+      description: Saves the user's date of birth in YYYY-MM-DD format. DOB is stored but never returned by any API — age is derived on read. No age restriction enforced.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dateOfBirth]
+              properties:
+                dateOfBirth:
+                  type: string
+                  format: date
+                  example: "2000-05-15"
+      responses:
+        '200':
+          $ref: '#/components/responses/OnboardingStepSuccess'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /onboarding/step/3:
+    patch:
+      tags: [Onboarding]
+      summary: Step 3 — Save gender
+      description: Saves the user's gender. Must be one of the four allowed values. Gender is immutable once set — it cannot be changed via Edit Profile later.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [gender]
+              properties:
+                gender:
+                  type: string
+                  enum: [man, woman, non_binary, prefer_not_to_say]
+                  example: man
+      responses:
+        '200':
+          $ref: '#/components/responses/OnboardingStepSuccess'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /onboarding/step/4:
+    patch:
+      tags: [Onboarding]
+      summary: Step 4 — Save city
+      description: Saves the user's home city. Must be a valid city slug from GET /cities. Determines which events and groups the user sees by default in the Feed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cityId]
+              properties:
+                cityId:
+                  type: string
+                  example: del
+                  description: Must be a valid city slug from GET /cities
+      responses:
+        '200':
+          $ref: '#/components/responses/OnboardingStepSuccess'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /onboarding/step/5:
+    patch:
+      tags: [Onboarding]
+      summary: Step 5 — Save lifestyle tags
+      description: Saves the user's lifestyle tag selections. Min 3, max 5. Replaces the entire existing selection — send the full desired set, not a diff. These tags appear on the user's anchor card in the Groups feed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lifestyleTagIds]
+              properties:
+                lifestyleTagIds:
+                  type: array
+                  minItems: 3
+                  maxItems: 5
+                  items:
+                    type: string
+                    format: uuid
+                  example:
+                    - be1c46e0-e44b-4776-89fd-e15b97b95fc7
+                    - 54e18447-c11a-4613-9b18-6e71f8012f2a
+                    - f184d05f-24ec-4148-953f-7f007fcaf7bc
+      responses:
+        '200':
+          $ref: '#/components/responses/OnboardingStepSuccess'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /onboarding/step/6:
+    patch:
+      tags: [Onboarding]
+      summary: Step 6 — Save photos
+      description: |
+        Saves the user's profile photos. Min 2, max 4. Position 0 is the Main photo and is required. Replaces the entire existing photo set on every call.
+
+        > **Stubbed in Phase 1:** accepts s3Key strings directly. Real flow (pre-launch): client gets a presigned S3 URL, uploads directly to S3, then sends the returned s3Key here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [photos]
+              properties:
+                photos:
+                  type: array
+                  minItems: 2
+                  maxItems: 4
+                  items:
+                    type: object
+                    required: [s3Key, position]
+                    properties:
+                      s3Key:
+                        type: string
+                        example: profiles/user-id/photo-0.jpg
+                      position:
+                        type: integer
+                        minimum: 0
+                        maximum: 3
+                        description: Position 0 is the Main photo
+      responses:
+        '200':
+          $ref: '#/components/responses/OnboardingStepSuccess'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /onboarding/step/7:
+    patch:
+      tags: [Onboarding]
+      summary: Step 7 — Save email (unlocks Feed)
+      description: |
+        Saves the user's email and completes onboarding. This is the only endpoint that sets `partialProfileComplete = true`, which is the gate that grants Feed access.
+
+        Email is stored lowercase. It is **not** a login credential — phone is. Used only for ticket delivery and reminders.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: sayantan@cirkle.live
+      responses:
+        '200':
+          description: Onboarding complete — Feed access unlocked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  currentOnboardingStep:
+                    type: integer
+                  partialProfileComplete:
+                    type: boolean
+              example:
+                success: true
+                currentOnboardingStep: 7
+                partialProfileComplete: true
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ─── PROFILE ──────────────────────────────────────────────────────────
+
+  /profile/me:
+    get:
+      tags: [Profile]
+      summary: Get own profile
+      description: Returns the complete profile of the logged-in user. DOB is never returned — age is derived on read. All optional fields (bio, tagline) are present in the response as null if not yet set.
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  profile:
+                    $ref: '#/components/schemas/Profile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Profile not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    patch:
+      tags: [Profile]
+      summary: Edit own profile
+      description: |
+        Partial update — only fields included in the request body are updated. Omitted fields stay unchanged.
+
+        **Immutable field:** `gender` cannot be changed once set. Attempting to update it returns 400.
+
+        **Set replacement:** `lifestyleTagIds` and `photos` replace the entire existing set — send the full desired set, not a diff.
+
+        All updates run inside a single transaction with a row-level lock to prevent race conditions.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                firstName:
+                  type: string
+                  minLength: 2
+                  example: Sayantan
+                lastName:
+                  type: string
+                  minLength: 2
+                  example: Roy
+                bio:
+                  type: string
+                  example: Love live music and meeting new people
+                tagline:
+                  type: string
+                  example: Always up for an adventure
+                gender:
+                  type: string
+                  enum: [man, woman, non_binary, prefer_not_to_say]
+                  description: Immutable once set — returns 400 if already set
+                cityId:
+                  type: string
+                  example: del
+                email:
+                  type: string
+                  format: email
+                  example: sayantan@cirkle.live
+                lifestyleTagIds:
+                  type: array
+                  minItems: 3
+                  maxItems: 5
+                  items:
+                    type: string
+                    format: uuid
+                photos:
+                  type: array
+                  minItems: 2
+                  maxItems: 4
+                  items:
+                    type: object
+                    properties:
+                      s3Key:
+                        type: string
+                      position:
+                        type: integer
+                        minimum: 0
+                        maximum: 3
+      responses:
+        '200':
+          description: Profile updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+              example:
+                success: true
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ─── EVENTS ───────────────────────────────────────────────────────────
+
+  /events:
+    get:
+      tags: [Events]
+      summary: Get events feed
+      description: |
+        Returns events for the active city, ordered by start time ascending.
+
+        - **Default city:** the user's profile city set during onboarding.
+        - **Override city:** pass `?city=mum` to browse events in another city.
+        - **Category filter:** pass `?category=concert` to filter by event type.
+
+        Both params can be combined: `?city=del&category=club`
+      parameters:
+        - in: query
+          name: city
+          schema:
+            type: string
+            example: mum
+          required: false
+          description: Override the default city. Must be a valid city slug from GET /cities.
+        - in: query
+          name: category
+          schema:
+            type: string
+            enum: [club, concert, trip, meetup]
+            example: concert
+          required: false
+          description: Filter by event category.
+      responses:
+        '200':
+          description: List of events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Event'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /events/{id}:
+    get:
+      tags: [Events]
+      summary: Get event detail
+      description: Returns full detail for a single event by ID. This is the generic state — no group context. The via-anchor state (showing a specific group's info on this screen) is added in the Groups phase.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Event UUID
+      responses:
+        '200':
+          description: Event detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  event:
+                    $ref: '#/components/schemas/Event'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Event not found
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+# ─── COMPONENTS ───────────────────────────────────────────────────────
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token obtained from POST /auth/login. Valid for 7 days.
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          example: Error message here
+
+    City:
+      type: object
+      properties:
+        id:
+          type: string
+          example: del
+          description: City slug identifier
+        name:
+          type: string
+          example: Delhi NCR
+
+    EventCategory:
+      type: object
+      properties:
+        id:
+          type: string
+          example: club
+          description: Category slug identifier — used in ?category= query params
+        label:
+          type: string
+          example: Clubs
+
+    LifestyleTag:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: be1c46e0-e44b-4776-89fd-e15b97b95fc7
+        label:
+          type: string
+          example: Clubbing
+        category:
+          type: string
+          example: Going out
+
+    Photo:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        s3Key:
+          type: string
+          example: profiles/user-id/photo-0.jpg
+        position:
+          type: integer
+          minimum: 0
+          maximum: 3
+          description: Position 0 is the Main photo
+
+    Profile:
+      type: object
+      properties:
+        firstName:
+          type: string
+          example: Sayantan
+        lastName:
+          type: string
+          example: Roy
+        age:
+          type: integer
+          example: 26
+          description: Derived from DOB on read — DOB is never returned directly
+        gender:
+          type: string
+          enum: [man, woman, non_binary, prefer_not_to_say]
+          description: Immutable once set
+        cityId:
+          type: string
+          example: del
+        email:
+          type: string
+          example: sayantan@cirkle.live
+        bio:
+          type: string
+          nullable: true
+          example: Love live music
+        tagline:
+          type: string
+          nullable: true
+          example: Always up for an adventure
+        photos:
+          type: array
+          items:
+            $ref: '#/components/schemas/Photo'
+        lifestyleTags:
+          type: array
+          items:
+            $ref: '#/components/schemas/LifestyleTag'
+
+    Event:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: Sunidhi Chauhan Live
+        categoryId:
+          type: string
+          example: concert
+        cityId:
+          type: string
+          example: del
+        startsAt:
+          type: string
+          format: date-time
+          example: "2026-08-14T19:00:00+05:30"
+        endsAt:
+          type: string
+          format: date-time
+          nullable: true
+        price:
+          type: integer
+          example: 50000
+          description: In paise. ₹500 = 50000
+        targetGroupSize:
+          type: integer
+          example: 4
+        venueName:
+          type: string
+          example: Jawaharlal Nehru Stadium
+        venueAddress:
+          type: string
+          example: Lodhi Road, New Delhi
+        description:
+          type: string
+          nullable: true
+        bannerS3Key:
+          type: string
+          nullable: true
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: No token provided
+
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: Validation error message
+
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: Internal server error
+
+    OnboardingStepSuccess:
+      description: Step saved successfully
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              currentOnboardingStep:
+                type: integer
+          example:
+            success: true
+            currentOnboardingStep: 1

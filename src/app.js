@@ -8,6 +8,10 @@ import authRouter from './routes/auth.js';
 import onboardingRouter from './routes/onboarding.js';
 import profileRouter from './routes/profile.js';
 import eventsRouter from './routes/events.js';
+import ordersRouter from './routes/orders.js';
+import webhookRouter from './routes/webhook.js';
+import ticketsRouter from './routes/tickets.js';
+import couponsRouter from './routes/coupons.js';
 
 export function createApp() {
   const app = express();
@@ -18,7 +22,11 @@ export function createApp() {
       credentials: true,
     }
   ));
-  app.use(express.json());
+  app.use(express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    }
+  }));
 
   // Swagger UI — API documentation
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
@@ -28,6 +36,11 @@ export function createApp() {
   app.use('/onboarding', onboardingRouter);
   app.use('/profile', profileRouter);
   app.use('/events', eventsRouter);
+  app.use('/payments',ordersRouter);
+  app.use('/webhooks',webhookRouter);
+  app.use('/tickets', ticketsRouter);
+  app.use('/coupons', couponsRouter);
+
 
   app.get('/health', (req, res) => {
     res.json({ status: 'ok', service: 'cirkle-backend' });

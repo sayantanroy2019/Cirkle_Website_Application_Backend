@@ -38,8 +38,356 @@ tags:
     description: View and edit the logged-in user's profile.
   - name: Events
     description: Browse and view events. City-filtered by default, overridable via query param.
+  - name: Coupons
+    description: Coupon preview and validation.
+  - name: Payments
+    description: Order creation, payment verification, and status polling. Razorpay-backed.
+  - name: Tickets
+    description: The user's purchased tickets. Pure proof-of-purchase — no group or payment-flow data.
 
 paths:
+
+  # ─── COUPONS ──────────────────────────────────────────────────────────
+
+  /coupons/validate:
+    post:
+      tags: [Coupons]
+      summary: Preview a coupon
+      description: |
+        Validates a coupon against an event and returns the recomputed price breakdown so the checkout screen can update live.
+
+        Reserves nothing. The order endpoint re-validates independently — a successful preview here is **not** authorization to charge a discounted amount.
+
+        GST is computed on the post-discount subtotal. A flat coupon larger than the ticket price is clamped so the subtotal never goes negative.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, eventId]
+              properties:
+                code:
+                  type: string
+                  example: CIRKLE100
+                eventId:
+                  type: string
+                  format: uuid
+      responses:
+        '200':
+          description: Coupon is valid — breakdown returned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid:
+                    type: boolean
+                    example: true
+                  couponCode:
+                    type: string
+                    example: CIRKLE100
+                  breakdown:
+                    $ref: '#/components/schemas/PriceBreakdown'
+        '400':
+          description: Coupon invalid, expired, exhausted, or not applicable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: This coupon has expired
+        '404':
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ─── PAYMENTS ─────────────────────────────────────────────────────────
+
+  /payments/orders:
+    post:
+      tags: [Payments]
+      summary: Create order and start checkout
+      description: |
+        Claims a seat hold and creates a Razorpay order. The amount is computed server-side from the event price, an optional coupon, and the current GST rate — never accepted from the client.
+
+        If the user already holds a live hold for this event, the existing order is **resumed** (same Razorpay order, same frozen price) rather than duplicated. `resumed: true` indicates this.
+
+        The full price breakdown is frozen onto the order at creation and returned here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [eventId]
+              properties:
+                eventId:
+                  type: string
+                  format: uuid
+                couponCode:
+                  type: string
+                  example: CIRKLE100
+                  description: Optional
+      responses:
+        '201':
+          description: Order created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderCreated'
+        '200':
+          description: Existing live hold resumed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderCreated'
+        '400':
+          description: Missing event, or coupon became invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Invite-only event — an accepted invitation is required before purchase
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: An accepted invitation is required to buy a ticket to this event
+        '404':
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Cannot buy — already ticketed, sold out, or event started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                alreadyTicketed:
+                  value:
+                    error: You already have a ticket to this event
+                soldOut:
+                  value:
+                    error: This event is sold out
+                started:
+                  value:
+                    error: This event has already started
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /payments/orders/verify:
+    post:
+      tags: [Payments]
+      summary: Verify payment (fast path)
+      description: |
+        Relayed by the browser after Razorpay's checkout handler fires. Verifies the checkout signature, marks the order paid, and creates the ticket.
+
+        This endpoint failing does **not** mean the payment failed — it means the browser relay failed. The client must fall back to polling `GET /payments/orders/{id}`, never show an error.
+
+        Idempotent: the webhook may have already confirmed this order, in which case the existing ticket is returned unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [razorpay_order_id, razorpay_payment_id, razorpay_signature]
+              properties:
+                razorpay_order_id:
+                  type: string
+                  example: order_Nx8kL2mP9qR3sT
+                razorpay_payment_id:
+                  type: string
+                  example: pay_Nx8kL5mP9qR3sT
+                razorpay_signature:
+                  type: string
+      responses:
+        '200':
+          description: Payment confirmed, ticket created (or already existed)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  orderId:
+                    type: string
+                    format: uuid
+                  bookingRef:
+                    type: string
+                    example: CRKL-7F3A2C9E
+        '400':
+          description: Missing fields or signature verification failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Duplicate ticket — charged twice, refund will be processed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /payments/orders/{id}:
+    get:
+      tags: [Payments]
+      summary: Poll order status
+      description: |
+        Returns the current status of an order, scoped to the owner. The client polls this when the verify relay fails, waiting for the webhook to confirm the payment independently.
+
+        `bookingRef` is null until the ticket exists. The signal to stop polling is `status: paid`.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Order status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  orderId:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    enum: [created, paid, failed, expired, refunded]
+                  totalPaise:
+                    type: integer
+                  eventId:
+                    type: string
+                    format: uuid
+                  bookingRef:
+                    type: string
+                    nullable: true
+                    example: CRKL-7F3A2C9E
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /webhooks/razorpay:
+    post:
+      tags: [Payments]
+      summary: Razorpay webhook (server-to-server)
+      description: |
+        Authoritative payment confirmation from Razorpay. Not called by clients — listed for completeness.
+
+        Verifies the webhook signature over the raw request body (different secret and payload from the checkout signature), then performs the same idempotent confirmation as the verify endpoint. Returns 200 even when ignoring an event, so Razorpay stops retrying; returns 500 only on transient failure, where a retry should succeed.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Razorpay webhook payload (payment.captured)
+      responses:
+        '200':
+          description: Received (processed or intentionally ignored)
+        '400':
+          description: Missing or invalid signature
+        '500':
+          description: Transient processing failure — Razorpay will retry
+
+  # ─── TICKETS ──────────────────────────────────────────────────────────
+
+  /tickets:
+    get:
+      tags: [Tickets]
+      summary: List my tickets
+      description: |
+        The My Tickets list. Pure proof-of-purchase logistics — never any group, anchor, or payment-flow data, by design.
+      parameters:
+        - in: query
+          name: filter
+          schema:
+            type: string
+            enum: [upcoming, past]
+            default: upcoming
+          description: Upcoming events (not yet started) or past events.
+      responses:
+        '200':
+          description: List of tickets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tickets:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TicketListItem'
+        '400':
+          description: Invalid filter value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /tickets/{id}:
+    get:
+      tags: [Tickets]
+      summary: Ticket detail
+      description: |
+        Full ticket detail including the booking reference the QR encodes and the price paid. Scoped to the owner. No group information appears here.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Ticket detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ticket:
+                    $ref: '#/components/schemas/TicketDetail'
+        '404':
+          description: Ticket not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
 
   # ─── REFERENCE ────────────────────────────────────────────────────────
 
@@ -649,6 +997,79 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /events/{id}/invitations:
+    post:
+      tags: [Events]
+      summary: Request an invitation to an invite-only event
+      description: |
+        Creates a 'pending' invitation request for the logged-in user. Only valid for events with `eventType: invite_only`.
+
+        A UNIQUE(user_id, event_id) constraint enforces one request per user per event — you cannot request twice while pending, re-request after rejection, or request again after acceptance. Attempting any of those returns 409 with the existing status.
+
+        Approval/rejection happens outside this API (organizer tooling, out of scope). Poll `GET /events/{id}` to see `invitationStatus` change.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Event UUID
+      responses:
+        '201':
+          description: Invitation request created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: pending
+        '400':
+          description: Event is not invite-only
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: This event does not require an invitation
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: A request already exists for this user and event
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  status:
+                    type: string
+                    enum: [pending, accepted, rejected]
+              examples:
+                alreadyPending:
+                  value:
+                    error: You have already requested an invitation
+                    status: pending
+                alreadyAccepted:
+                  value:
+                    error: Your invitation is already accepted
+                    status: accepted
+                alreadyRejected:
+                  value:
+                    error: Access to this event has been denied
+                    status: rejected
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 # ─── COMPONENTS ───────────────────────────────────────────────────────
 
 components:
@@ -800,6 +1221,152 @@ components:
         bannerS3Key:
           type: string
           nullable: true
+        userHasTicket:
+          type: boolean
+          description: Whether the requesting user already holds a ticket to this event (only present on GET /events/{id})
+        soldOut:
+          type: boolean
+          description: Whether a capped event has no seats left (only present on GET /events/{id})
+        eventType:
+          type: string
+          enum: [open, invite_only]
+          description: If invite_only, an accepted invitation is required before POST /payments/orders will succeed (only present on GET /events/{id})
+        invitationStatus:
+          type: string
+          nullable: true
+          enum: [pending, accepted, rejected]
+          description: The requesting user's invitation status for an invite_only event. Null if no request has been made yet, or if the event is open (only present on GET /events/{id})
+
+    PriceBreakdown:
+      type: object
+      description: All amounts in paise. GST is computed on the post-discount subtotal.
+      properties:
+        basePricePaise:
+          type: integer
+          example: 50000
+        discountPaise:
+          type: integer
+          example: 10000
+          description: Clamped to base price — never exceeds it
+        subtotalPaise:
+          type: integer
+          example: 40000
+          description: base − discount
+        gstPercentage:
+          type: number
+          example: 18
+        gstPaise:
+          type: integer
+          example: 7200
+          description: Rounded to the nearest paisa
+        totalPaise:
+          type: integer
+          example: 47200
+          description: What Razorpay charges
+
+    OrderCreated:
+      type: object
+      properties:
+        orderId:
+          type: string
+          format: uuid
+          description: Cirkle's order ID — used for status polling
+        razorpayOrderId:
+          type: string
+          example: order_Nx8kL2mP9qR3sT
+          description: Razorpay's order ID — passed to the checkout SDK
+        razorpayKeyId:
+          type: string
+          example: rzp_test_XXXXXXXX
+          description: Public key ID for the checkout SDK
+        amount:
+          type: integer
+          example: 47200
+          description: Total in paise, equals breakdown.totalPaise
+        currency:
+          type: string
+          example: INR
+        expiresAt:
+          type: string
+          format: date-time
+          description: When the seat hold lapses
+        resumed:
+          type: boolean
+          description: True if an existing live hold was returned instead of a new order
+        breakdown:
+          $ref: '#/components/schemas/PriceBreakdown'
+
+    TicketListItem:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        bookingRef:
+          type: string
+          example: CRKL-7F3A2C9E
+        checkedIn:
+          type: boolean
+        event:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+            categoryId:
+              type: string
+            startsAt:
+              type: string
+              format: date-time
+            venueName:
+              type: string
+            venueAddress:
+              type: string
+            bannerS3Key:
+              type: string
+              nullable: true
+
+    TicketDetail:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        bookingRef:
+          type: string
+          example: CRKL-7F3A2C9E
+          description: The string the QR code encodes
+        checkedIn:
+          type: boolean
+        pricePaid:
+          type: integer
+          example: 47200
+          description: In paise
+        bookedAt:
+          type: string
+          format: date-time
+        event:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+            categoryId:
+              type: string
+            startsAt:
+              type: string
+              format: date-time
+            venueName:
+              type: string
+            venueAddress:
+              type: string
+            bannerS3Key:
+              type: string
+              nullable: true
 
   responses:
     Unauthorized:

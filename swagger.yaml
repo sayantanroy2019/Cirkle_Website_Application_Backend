@@ -44,6 +44,8 @@ tags:
     description: Order creation, payment verification, and status polling. Razorpay-backed.
   - name: Tickets
     description: The user's purchased tickets. Pure proof-of-purchase — no group or payment-flow data.
+  - name: Vibes
+    description: Social-proof discovery feed. One card per upcoming ticket held by someone else, ranked by gender/city tiers.
 
 paths:
 
@@ -382,6 +384,47 @@ paths:
                     $ref: '#/components/schemas/TicketDetail'
         '404':
           description: Ticket not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ─── VIBES ────────────────────────────────────────────────────────────
+
+  /vibes:
+    get:
+      tags: [Vibes]
+      summary: Get the social-proof discovery feed
+      description: |
+        Returns up to 100 cards, one per upcoming ticket held by someone other than the viewer. Excludes the viewer's own tickets and events that have already started.
+
+        Ordering is five tiers based on the viewer's gender and city vs. each card's person and event city, then soonest event first, then newest ticket as a tiebreak:
+
+        **Male viewer:** woman/same-city (1) → woman/other-city (2) → man/same-city (3) → man/other-city (4) → everyone else (5)
+
+        **Female viewer:** man/same-city (1) → woman/same-city (2) → man/other-city (3) → woman/other-city (4) → everyone else (5)
+
+        **non_binary / prefer_not_to_say viewer:** no gender preference — all cards rank in a single tier, ordered by event date only.
+
+        "Same city" is evaluated against the event's city (where the plan is), not the card's person's home city.
+      responses:
+        '200':
+          description: Discovery feed cards
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cards:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/VibeCard'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Profile not found
           content:
             application/json:
               schema:
@@ -1367,6 +1410,67 @@ components:
             bannerS3Key:
               type: string
               nullable: true
+
+    VibeCard:
+      type: object
+      description: One upcoming ticket held by someone other than the viewer.
+      properties:
+        ticketId:
+          type: string
+          format: uuid
+        person:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            firstName:
+              type: string
+              example: Priya
+            age:
+              type: integer
+              example: 26
+            gender:
+              $ref: '#/components/schemas/Gender'
+            tagline:
+              type: string
+              nullable: true
+              example: Always up for an adventure
+            photos:
+              type: array
+              items:
+                $ref: '#/components/schemas/Photo'
+            lifestyleTags:
+              type: array
+              items:
+                $ref: '#/components/schemas/LifestyleTag'
+        event:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+              example: Saturday Night at Kitty Su
+            categoryId:
+              type: string
+              example: club
+            cityId:
+              type: string
+              example: del
+            startsAt:
+              type: string
+              format: date-time
+            venueName:
+              type: string
+            eventType:
+              type: string
+              enum: [open, invite_only]
+            goingCount:
+              type: integer
+              description: Total confirmed tickets to this event, including the card's person
+              example: 4
 
   responses:
     Unauthorized:

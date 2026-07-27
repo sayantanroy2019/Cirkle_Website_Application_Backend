@@ -46,6 +46,8 @@ tags:
     description: The user's purchased tickets. Pure proof-of-purchase — no group or payment-flow data.
   - name: Vibes
     description: Social-proof discovery feed. One card per upcoming ticket held by someone else, ranked by gender/city tiers.
+  - name: Uploads
+    description: Presigned S3 upload handshake for profile photos. The bucket is private — uploads go straight to S3, never through this backend.
 
 paths:
 
@@ -583,6 +585,62 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  # ─── UPLOADS ──────────────────────────────────────────────────────────
+
+  /uploads/profile-photo-url:
+    post:
+      tags: [Uploads]
+      summary: Get a presigned upload URL for a profile photo
+      description: |
+        Step 1 of the upload handshake:
+
+        1. **This endpoint** — call with the file's content type, get back `{ uploadUrl, key }`.
+        2. **Client uploads directly to S3** — `PUT` the raw file bytes to `uploadUrl` with a matching `Content-Type` header. This goes straight to S3, never through this backend.
+        3. **Save the key** — send the returned `key` as `s3Key` to `PATCH /onboarding/step/6` or `PATCH /profile/me`, which verifies the object actually landed in S3 before saving.
+
+        The key is server-generated (`profiles/{userId}/{uuid}.{ext}`) — the client never chooses where the file lands, which prevents one user overwriting another's photos.
+
+        `uploadUrl` expires in 5 minutes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contentType]
+              properties:
+                contentType:
+                  type: string
+                  enum: [image/jpeg, image/png, image/webp]
+                  example: image/jpeg
+      responses:
+        '200':
+          description: Presigned upload URL issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uploadUrl:
+                    type: string
+                    description: PUT the file here directly. Expires in 5 minutes.
+                  key:
+                    type: string
+                    example: profiles/3d7df698-53b0-4ea8-8e7d-3d7a64099ff1/a1b2c3d4-....jpg
+                    description: Send this back as s3Key when saving photos
+        '400':
+          description: Missing or unsupported contentType
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Only JPEG, PNG, and WebP images are allowed
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   # ─── ONBOARDING ───────────────────────────────────────────────────────
 
   /onboarding/status:
@@ -765,7 +823,7 @@ paths:
       description: |
         Saves the user's profile photos. Min 2, max 4. Position 0 is the Main photo and is required. Replaces the entire existing photo set on every call.
 
-        > **Stubbed in Phase 1:** accepts s3Key strings directly. Real flow (pre-launch): client gets a presigned S3 URL, uploads directly to S3, then sends the returned s3Key here.
+        Each `s3Key` must come from `POST /uploads/profile-photo-url` and must have actually been uploaded to S3 — this endpoint verifies every key exists in the bucket (via HeadObject) before saving anything. All-or-nothing: if any key fails verification, the whole request is rejected and no photos are saved.
       requestBody:
         required: true
         content:
@@ -785,6 +843,7 @@ paths:
                       s3Key:
                         type: string
                         example: profiles/user-id/photo-0.jpg
+                        description: The key returned by POST /uploads/profile-photo-url, after the file has been PUT to S3
                       position:
                         type: integer
                         minimum: 0
@@ -794,7 +853,18 @@ paths:
         '200':
           $ref: '#/components/responses/OnboardingStepSuccess'
         '400':
-          $ref: '#/components/responses/ValidationError'
+          description: Validation error, or one or more photos were not found in S3
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                validation:
+                  value:
+                    error: Upload between 2 and 4 photos
+                notUploaded:
+                  value:
+                    error: One or more photos were not uploaded successfully. Please try again.
         '401':
           $ref: '#/components/responses/Unauthorized'
         '500':
@@ -927,11 +997,13 @@ paths:
                   type: array
                   minItems: 2
                   maxItems: 4
+                  description: Replaces the entire existing photo set. Each s3Key is verified against S3 (via HeadObject) before saving — all-or-nothing.
                   items:
                     type: object
                     properties:
                       s3Key:
                         type: string
+                        description: The key returned by POST /uploads/profile-photo-url, after the file has been PUT to S3
                       position:
                         type: integer
                         minimum: 0
@@ -949,7 +1021,18 @@ paths:
               example:
                 success: true
         '400':
-          $ref: '#/components/responses/ValidationError'
+          description: Validation error, gender already set, or one or more photos were not found in S3
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                validation:
+                  value:
+                    error: First name must be at least 2 characters
+                notUploaded:
+                  value:
+                    error: One or more photos were not uploaded successfully. Please try again.
         '401':
           $ref: '#/components/responses/Unauthorized'
         '500':
@@ -1173,9 +1256,10 @@ components:
         id:
           type: string
           format: uuid
-        s3Key:
+        url:
           type: string
-          example: profiles/user-id/photo-0.jpg
+          description: Presigned GET URL, ~1 hour TTL. The bucket is private — never cache this long-term, it expires. Generated fresh on every read.
+          example: https://cirkle-user-photos.s3.ap-south-1.amazonaws.com/profiles/user-id/photo-0.jpg?X-Amz-Signature=...
         position:
           type: integer
           minimum: 0

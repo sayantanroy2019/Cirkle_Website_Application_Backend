@@ -1,6 +1,7 @@
 import express from 'express';
 import {pool} from '../config/db.js';
 import authenticate from '../middlewares/auth.js';
+import { objectExists } from '../utils/s3.js';
 
 const onboardingRouter = express.Router();
 
@@ -267,9 +268,9 @@ onboardingRouter.patch('/step/5', authenticate, async (req, res) => {
 
 // PATCH /onboarding/step/6
 // Saves profile photos
-// STUBBED: accepts s3Key strings directly — no real S3 upload yet
-// Real flow (pre-launch): client gets presigned URL → uploads to S3 →
-// sends s3Key back here → server verifies via HeadObject → saves
+// Client gets a presigned URL from POST /uploads/profile-photo-url, uploads
+// directly to S3, then sends the returned key here. Each key is verified
+// via HeadObject (objectExists) before anything is saved.
 // Min 2, max 4 photos. Position 0 = Main photo (required).
 onboardingRouter.patch('/step/6', authenticate, async (req, res) => {
     const { photos } = req.body;
@@ -300,6 +301,20 @@ onboardingRouter.patch('/step/6', authenticate, async (req, res) => {
     const uniquePositions = new Set(positions);
     if (uniquePositions.size !== positions.length) {
         return res.status(400).json({ error: 'Each photo must have a unique position' });
+    }
+
+    // Verify every claimed upload actually landed in S3 before saving anything.
+    // All-or-nothing — a partial set is worse than rejecting the whole request.
+    try {
+        for (const photo of photos) {
+            const exists = await objectExists(photo.s3Key);
+            if (!exists) {
+                return res.status(400).json({ error: 'One or more photos were not uploaded successfully. Please try again.' });
+            }
+        }
+    } catch (err) {
+        console.error('PATCH /onboarding/step/6 S3 verification error:', err.message);
+        return res.status(500).json({ error: 'Internal server error' });
     }
 
     const client = await pool.connect();

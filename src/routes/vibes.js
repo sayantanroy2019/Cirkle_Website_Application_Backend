@@ -1,6 +1,7 @@
 import express from 'express';
 import { pool } from '../config/db.js';
 import authenticate from '../middlewares/auth.js';
+import { getPhotoViewUrls } from '../utils/s3.js';
 
 const vibesRouter = express.Router();
 
@@ -50,8 +51,13 @@ vibesRouter.get('/', authenticate, async (req, res) => {
                     ELSE 5
                 END`;
         } else {
-            // No gender preference — everyone in one tier
-            tierRankSql = `1`;
+            // No gender preference — everyone in one tier.
+            // Still references $2 so the query text always declares 2 params
+            // (Postgres infers the count from what's referenced in the SQL,
+            // and the caller always binds [userId, viewerCity]). The ELSE
+            // fallback means this is 1 whether the WHEN matches, doesn't
+            // match, or is NULL — no NULL-handling edge case to worry about.
+            tierRankSql = `CASE WHEN e.city_id = $2 THEN 1 ELSE 1 END`;
         }
 
         // Note: card city tier is based on the EVENT's city (where the plan is),
@@ -109,10 +115,15 @@ vibesRouter.get('/', authenticate, async (req, res) => {
             [personIds]
         );
 
+        // Bucket is private — sign every key across every card in one batch,
+        // not per-card. Signing is local crypto (no network call), so this
+        // stays fast even at the 100-card cap.
+        const viewUrls = await getPhotoViewUrls(photos.rows.map(row => row.s3_key));
+
         // Group photos and tags by person for quick lookup
         const photosByPerson = {};
         for (const row of photos.rows) {
-            (photosByPerson[row.user_id] ??= []).push({ s3Key: row.s3_key, position: row.position });
+            (photosByPerson[row.user_id] ??= []).push({ url: viewUrls[row.s3_key], position: row.position });
         }
         const tagsByPerson = {};
         for (const row of tags.rows) {

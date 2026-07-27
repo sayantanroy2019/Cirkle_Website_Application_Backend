@@ -204,7 +204,27 @@ describe('PATCH /onboarding/step/5 — lifestyle tags', () => {
 });
 
 // ─── PATCH /onboarding/step/6 ─────────────────────────────────────────
-describe('PATCH /onboarding/step/6 — photos (stubbed)', () => {
+
+// Real upload handshake: get a presigned URL, PUT real bytes to S3, return
+// the key. Mirrors the actual frontend contract — the endpoint now verifies
+// every key against S3 before saving, so a fake key is no longer accepted.
+async function uploadTestPhoto() {
+    const urlRes = await request(app)
+        .post('/uploads/profile-photo-url')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ contentType: 'image/jpeg' });
+    const { uploadUrl, key } = urlRes.body;
+
+    await fetch(uploadUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'image/jpeg' },
+        body: Buffer.from('test-jpeg-bytes')
+    });
+
+    return key;
+}
+
+describe('PATCH /onboarding/step/6 — photos', () => {
 
     it('returns 400 for too few photos', async () => {
         const res = await request(app)
@@ -227,13 +247,28 @@ describe('PATCH /onboarding/step/6 — photos (stubbed)', () => {
         expect(res.body.error).toBe('A main photo (position 0) is required');
     });
 
-    it('saves photos and advances step', async () => {
+    it('rejects keys that were never actually uploaded to S3', async () => {
         const res = await request(app)
             .patch('/onboarding/step/6')
             .set('Authorization', `Bearer ${token}`)
             .send({ photos: [
-                { s3Key: 'profiles/test/photo-0.jpg', position: 0 },
-                { s3Key: 'profiles/test/photo-1.jpg', position: 1 }
+                { s3Key: 'profiles/nonexistent/fake-0.jpg', position: 0 },
+                { s3Key: 'profiles/nonexistent/fake-1.jpg', position: 1 }
+            ]});
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/not uploaded successfully/i);
+    });
+
+    it('saves photos and advances step', async () => {
+        const key0 = await uploadTestPhoto();
+        const key1 = await uploadTestPhoto();
+
+        const res = await request(app)
+            .patch('/onboarding/step/6')
+            .set('Authorization', `Bearer ${token}`)
+            .send({ photos: [
+                { s3Key: key0, position: 0 },
+                { s3Key: key1, position: 1 }
             ]});
         expect(res.status).toBe(200);
         expect(res.body.success).toBe(true);

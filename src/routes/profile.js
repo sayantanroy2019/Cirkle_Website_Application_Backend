@@ -1,6 +1,7 @@
 import express from 'express';
 import {pool} from '../config/db.js';
 import authenticate from '../middlewares/auth.js';
+import { objectExists, getPhotoViewUrls } from '../utils/s3.js';
 
 const profileRouter = express.Router();
 
@@ -48,6 +49,9 @@ profileRouter.get('/me', authenticate, async (req, res) => {
             [req.user.userId]
         );
 
+        // Bucket is private — sign all keys in one batch rather than per-photo
+        const viewUrls = await getPhotoViewUrls(photosResult.rows.map(p => p.s3_key));
+
         res.json({
             profile: {
                 firstName:     profile.first_name,
@@ -60,7 +64,7 @@ profileRouter.get('/me', authenticate, async (req, res) => {
                 tagline:       profile.tagline,
                 photos:        photosResult.rows.map(p => ({
                     id:       p.id,
-                    s3Key:    p.s3_key,
+                    url:      viewUrls[p.s3_key],
                     position: p.position
                 })),
                 lifestyleTags: tagsResult.rows.map(t => ({
@@ -149,6 +153,21 @@ profileRouter.patch('/me', authenticate, async (req, res) => {
         const positions = photos.map(p => p.position);
         if (new Set(positions).size !== positions.length) {
             return res.status(400).json({ error: 'Each photo must have a unique position' });
+        }
+
+        // Verify every claimed upload actually landed in S3 before saving
+        // anything. All-or-nothing — a partial set is worse than rejecting
+        // the whole request.
+        try {
+            for (const photo of photos) {
+                const exists = await objectExists(photo.s3Key);
+                if (!exists) {
+                    return res.status(400).json({ error: 'One or more photos were not uploaded successfully. Please try again.' });
+                }
+            }
+        } catch (err) {
+            console.error('PATCH /profile/me S3 verification error:', err.message);
+            return res.status(500).json({ error: 'Internal server error' });
         }
     }
 

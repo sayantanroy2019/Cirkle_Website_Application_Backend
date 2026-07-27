@@ -13,6 +13,7 @@ import webhookRouter from './routes/webhook.js';
 import ticketsRouter from './routes/tickets.js';
 import couponsRouter from './routes/coupons.js';
 import vibesRouter from './routes/vibes.js';
+import uploadsRouter from './routes/uploads.js';
 
 export function createApp() {
   const app = express();
@@ -42,6 +43,7 @@ export function createApp() {
   app.use('/tickets', ticketsRouter);
   app.use('/coupons', couponsRouter);
   app.use('/vibes', vibesRouter);
+  app.use('/uploads', uploadsRouter);
 
 
   app.get('/health', (req, res) => {

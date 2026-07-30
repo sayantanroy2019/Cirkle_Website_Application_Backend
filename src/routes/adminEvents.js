@@ -1,0 +1,580 @@
+import express from 'express';
+import { pool } from '../config/db.js';
+import authenticateAdmin from '../middlewares/authenticateAdmin.js';
+import { recordAudit, diffChanges } from '../utils/audit.js';
+import {
+    objectExists,
+    getPhotoViewUrl,
+    getPhotoViewUrls,
+    createEventImageUploadUrl
+} from '../utils/s3.js';
+
+const adminEventsRouter = express.Router();
+
+const ALLOWED_EVENT_TYPES = ['open', 'invite_only'];
+const EDITABLE_COLUMNS = [
+    'name', 'category_id', 'city_id', 'starts_at', 'ends_at',
+    'price', 'capacity', 'target_group_size', 'event_type',
+    'venue_name', 'venue_address', 'description', 'organizer_id'
+];
+
+// Both admin roles may manage events — not gated by manage_admins.
+adminEventsRouter.use(authenticateAdmin);
+
+function toResponse(row) {
+    return {
+        id:              row.id,
+        name:            row.name,
+        categoryId:      row.category_id,
+        cityId:          row.city_id,
+        startsAt:        row.starts_at,
+        endsAt:          row.ends_at,
+        price:           row.price,
+        capacity:        row.capacity,
+        targetGroupSize: row.target_group_size,
+        eventType:       row.event_type,
+        venueName:       row.venue_name,
+        venueAddress:    row.venue_address,
+        description:     row.description,
+        organizerId:     row.organizer_id,
+        createdAt:       row.created_at,
+        updatedAt:       row.updated_at
+    };
+}
+
+// Shared validation for fields that appear on both create and edit.
+// `partial` = true skips presence checks (PATCH only validates what's sent).
+function validateEventFields(body, { partial }) {
+    const { name, startsAt, endsAt, price, capacity, targetGroupSize, eventType } = body;
+
+    if (!partial || name !== undefined) {
+        if (!name || !name.trim()) {
+            return 'name is required';
+        }
+    }
+
+    if (!partial && !startsAt) {
+        return 'startsAt is required';
+    }
+    if (startsAt !== undefined) {
+        const startsAtDate = new Date(startsAt);
+        if (isNaN(startsAtDate.getTime())) {
+            return 'Invalid startsAt format';
+        }
+        // On create, always future. On edit, only validated as future when
+        // it's actually being changed — so other fields (venue, description,
+        // price, ...) stay editable on events that already started.
+        if (startsAtDate <= new Date()) {
+            return 'startsAt must be in the future';
+        }
+    }
+
+    if (endsAt !== undefined && endsAt !== null) {
+        if (isNaN(new Date(endsAt).getTime())) {
+            return 'Invalid endsAt format';
+        }
+    }
+
+    if (!partial && (price === undefined || price === null)) {
+        return 'price is required';
+    }
+    if (price !== undefined && (!Number.isInteger(price) || price < 0)) {
+        return 'price must be a non-negative integer (paise)';
+    }
+
+    if (capacity !== undefined && capacity !== null && (!Number.isInteger(capacity) || capacity <= 0)) {
+        return 'capacity must be a positive integer, or null for uncapped';
+    }
+
+    if (!partial && (targetGroupSize === undefined || targetGroupSize === null)) {
+        return 'targetGroupSize is required';
+    }
+    if (targetGroupSize !== undefined && (!Number.isInteger(targetGroupSize) || targetGroupSize <= 0)) {
+        return 'targetGroupSize must be a positive integer';
+    }
+
+    if (eventType !== undefined && !ALLOWED_EVENT_TYPES.includes(eventType)) {
+        return `eventType must be one of: ${ALLOWED_EVENT_TYPES.join(', ')}`;
+    }
+
+    return null;
+}
+
+// POST /admin/events
+// Creates an event with no images — a new event needs an id before images
+// can be keyed to events/{eventId}/..., so images are attached afterward
+// via the endpoints below.
+adminEventsRouter.post('/', async (req, res) => {
+    const {
+        name, categoryId, cityId, startsAt, endsAt,
+        price, capacity, targetGroupSize, eventType,
+        venueName, venueAddress, description, organizerId
+    } = req.body;
+
+    const validationError = validateEventFields(req.body, { partial: false });
+    if (validationError) {
+        return res.status(400).json({ error: validationError });
+    }
+    if (!categoryId) {
+        return res.status(400).json({ error: 'categoryId is required' });
+    }
+    if (!cityId) {
+        return res.status(400).json({ error: 'cityId is required' });
+    }
+
+    const client = await pool.connect();
+
+    try {
+        const categoryCheck = await client.query('SELECT id FROM event_categories WHERE id = $1', [categoryId]);
+        if (categoryCheck.rows.length === 0) {
+            return res.status(400).json({ error: 'Invalid categoryId' });
+        }
+
+        const cityCheck = await client.query('SELECT id FROM cities WHERE id = $1', [cityId]);
+        if (cityCheck.rows.length === 0) {
+            return res.status(400).json({ error: 'Invalid cityId' });
+        }
+
+        if (organizerId) {
+            const organizerCheck = await client.query('SELECT id FROM organizers WHERE id = $1', [organizerId]);
+            if (organizerCheck.rows.length === 0) {
+                return res.status(400).json({ error: 'Invalid organizerId' });
+            }
+        }
+
+        await client.query('BEGIN');
+
+        const inserted = await client.query(
+            `INSERT INTO events (
+                name, category_id, city_id, starts_at, ends_at,
+                price, capacity, target_group_size, event_type,
+                venue_name, venue_address, description, organizer_id
+             ) VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, COALESCE($9, 'open'),
+                $10, $11, $12, $13
+             )
+             RETURNING *`,
+            [
+                name.trim(), categoryId, cityId, startsAt, endsAt ?? null,
+                price, capacity ?? null, targetGroupSize, eventType ?? null,
+                venueName ?? null, venueAddress ?? null, description ?? null, organizerId ?? null
+            ]
+        );
+        const event = inserted.rows[0];
+
+        await recordAudit(client, {
+            adminId: req.admin.adminId,
+            action: 'create',
+            entityType: 'event',
+            entityId: event.id,
+            changes: toResponse(event)
+        });
+
+        await client.query('COMMIT');
+
+        res.status(201).json({ event: toResponse(event) });
+
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('POST /admin/events error:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        client.release();
+    }
+});
+
+// GET /admin/events
+// Filterable by organizerId, cityId, and status (upcoming|past). List view
+// includes bannerUrl (batch-signed) but not the gallery — that's detail-only.
+adminEventsRouter.get('/', async (req, res) => {
+    const { organizerId, cityId, status } = req.query;
+
+    const conditions = [];
+    const values = [];
+    let paramCount = 1;
+
+    if (organizerId !== undefined) {
+        conditions.push(`e.organizer_id = $${paramCount++}`);
+        values.push(organizerId);
+    }
+    if (cityId !== undefined) {
+        conditions.push(`e.city_id = $${paramCount++}`);
+        values.push(cityId);
+    }
+    if (status === 'upcoming') {
+        conditions.push('e.starts_at > now()');
+    } else if (status === 'past') {
+        conditions.push('e.starts_at <= now()');
+    } else if (status !== undefined) {
+        return res.status(400).json({ error: 'status must be upcoming or past' });
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    try {
+        const result = await pool.query(
+            `SELECT e.*, o.display_name AS organizer_name
+             FROM events e
+             LEFT JOIN organizers o ON o.id = e.organizer_id
+             ${where}
+             ORDER BY e.starts_at DESC`,
+            values
+        );
+
+        const bannerKeys = result.rows.map(r => r.banner_s3_key).filter(Boolean);
+        const viewUrls = await getPhotoViewUrls(bannerKeys);
+
+        res.json({
+            events: result.rows.map(row => ({
+                ...toResponse(row),
+                bannerUrl:     row.banner_s3_key ? viewUrls[row.banner_s3_key] : null,
+                organizerName: row.organizer_name ?? null
+            }))
+        });
+
+    } catch (err) {
+        console.error('GET /admin/events error:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// GET /admin/events/:id
+// Full detail: banner + gallery (both presigned) + organizer.
+adminEventsRouter.get('/:id', async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const result = await pool.query(
+            `SELECT e.*, o.id AS org_id, o.email AS org_email, o.display_name AS org_display_name
+             FROM events e
+             LEFT JOIN organizers o ON o.id = e.organizer_id
+             WHERE e.id = $1`,
+            [id]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Event not found' });
+        }
+
+        const row = result.rows[0];
+
+        const galleryResult = await pool.query(
+            'SELECT id, s3_key, position FROM event_photos WHERE event_id = $1 ORDER BY position ASC',
+            [id]
+        );
+
+        const allKeys = [row.banner_s3_key, ...galleryResult.rows.map(p => p.s3_key)].filter(Boolean);
+        const viewUrls = await getPhotoViewUrls(allKeys);
+
+        res.json({
+            event: {
+                ...toResponse(row),
+                bannerUrl: row.banner_s3_key ? viewUrls[row.banner_s3_key] : null,
+                gallery: galleryResult.rows.map(p => ({
+                    id:       p.id,
+                    url:      viewUrls[p.s3_key],
+                    position: p.position
+                })),
+                organizer: row.org_id ? {
+                    id:          row.org_id,
+                    email:       row.org_email,
+                    displayName: row.org_display_name
+                } : null
+            }
+        });
+
+    } catch (err) {
+        console.error('GET /admin/events/:id error:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// PATCH /admin/events/:id
+// Partial update — any field editable, including price and capacity even
+// after tickets are sold.
+//
+// IMPORTANT: editing price/capacity/etc. here does NOT retroactively affect
+// existing orders or tickets. orders.js freezes the full price breakdown
+// onto the order row at purchase time and never re-reads this events row —
+// so edits only ever affect future buyers. This is correct and intended;
+// no special handling needed here, this comment is the documentation.
+adminEventsRouter.patch('/:id', async (req, res) => {
+    const { id } = req.params;
+    const { categoryId, cityId, organizerId } = req.body;
+
+    const validationError = validateEventFields(req.body, { partial: true });
+    if (validationError) {
+        return res.status(400).json({ error: validationError });
+    }
+
+    const client = await pool.connect();
+
+    try {
+        const beforeResult = await client.query('SELECT * FROM events WHERE id = $1', [id]);
+        if (beforeResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Event not found' });
+        }
+        const before = beforeResult.rows[0];
+
+        if (categoryId !== undefined) {
+            const check = await client.query('SELECT id FROM event_categories WHERE id = $1', [categoryId]);
+            if (check.rows.length === 0) {
+                return res.status(400).json({ error: 'Invalid categoryId' });
+            }
+        }
+        if (cityId !== undefined) {
+            const check = await client.query('SELECT id FROM cities WHERE id = $1', [cityId]);
+            if (check.rows.length === 0) {
+                return res.status(400).json({ error: 'Invalid cityId' });
+            }
+        }
+        if (organizerId !== undefined && organizerId !== null) {
+            const check = await client.query('SELECT id FROM organizers WHERE id = $1', [organizerId]);
+            if (check.rows.length === 0) {
+                return res.status(400).json({ error: 'Invalid organizerId' });
+            }
+        }
+
+        const fieldValues = {
+            name:               req.body.name !== undefined ? req.body.name.trim() : undefined,
+            category_id:        categoryId,
+            city_id:            cityId,
+            starts_at:          req.body.startsAt,
+            ends_at:            req.body.endsAt,
+            price:              req.body.price,
+            capacity:           req.body.capacity,
+            target_group_size:  req.body.targetGroupSize,
+            event_type:         req.body.eventType,
+            venue_name:         req.body.venueName,
+            venue_address:      req.body.venueAddress,
+            description:        req.body.description,
+            organizer_id:       organizerId
+        };
+
+        const updates = [];
+        const values = [];
+        let paramCount = 1;
+
+        for (const column of EDITABLE_COLUMNS) {
+            const value = fieldValues[column];
+            if (value !== undefined) {
+                updates.push(`${column} = $${paramCount++}`);
+                values.push(value);
+            }
+        }
+
+        if (updates.length === 0) {
+            return res.status(400).json({ error: 'No fields to update' });
+        }
+
+        values.push(id);
+
+        await client.query('BEGIN');
+
+        const afterResult = await client.query(
+            `UPDATE events
+             SET ${updates.join(', ')}, updated_at = now()
+             WHERE id = $${paramCount}
+             RETURNING *`,
+            values
+        );
+        const after = afterResult.rows[0];
+
+        const changes = diffChanges(before, after, EDITABLE_COLUMNS);
+
+        if (Object.keys(changes).length > 0) {
+            await recordAudit(client, {
+                adminId: req.admin.adminId,
+                action: 'update',
+                entityType: 'event',
+                entityId: id,
+                changes
+            });
+        }
+
+        await client.query('COMMIT');
+
+        res.json({ event: toResponse(after) });
+
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('PATCH /admin/events/:id error:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        client.release();
+    }
+});
+
+// POST /admin/events/:id/image-url
+// Presigned PUT URL for an event image, same handshake as profile photos.
+// Body: { contentType, kind: 'banner' | 'gallery' }
+adminEventsRouter.post('/:id/image-url', async (req, res) => {
+    const { id } = req.params;
+    const { contentType, kind } = req.body;
+
+    if (!contentType) {
+        return res.status(400).json({ error: 'contentType is required' });
+    }
+    if (!['banner', 'gallery'].includes(kind)) {
+        return res.status(400).json({ error: "kind must be 'banner' or 'gallery'" });
+    }
+
+    try {
+        const eventCheck = await pool.query('SELECT id FROM events WHERE id = $1', [id]);
+        if (eventCheck.rows.length === 0) {
+            return res.status(404).json({ error: 'Event not found' });
+        }
+
+        const { uploadUrl, key } = await createEventImageUploadUrl(id, kind, contentType);
+        res.json({ uploadUrl, key });
+
+    } catch (err) {
+        if (err.message === 'UNSUPPORTED_TYPE') {
+            return res.status(400).json({ error: 'Only JPEG, PNG, and WebP images are allowed' });
+        }
+        console.error('POST /admin/events/:id/image-url error:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// PATCH /admin/events/:id/banner
+// Verifies the object exists in S3 before saving — same all-or-nothing
+// pattern as profile photos.
+adminEventsRouter.patch('/:id/banner', async (req, res) => {
+    const { id } = req.params;
+    const { s3Key } = req.body;
+
+    if (!s3Key) {
+        return res.status(400).json({ error: 's3Key is required' });
+    }
+
+    const client = await pool.connect();
+
+    try {
+        const eventCheck = await client.query('SELECT id, banner_s3_key FROM events WHERE id = $1', [id]);
+        if (eventCheck.rows.length === 0) {
+            return res.status(404).json({ error: 'Event not found' });
+        }
+        const before = eventCheck.rows[0];
+
+        const exists = await objectExists(s3Key);
+        if (!exists) {
+            return res.status(400).json({ error: 'The image was not uploaded successfully. Please try again.' });
+        }
+
+        await client.query('BEGIN');
+
+        await client.query(
+            'UPDATE events SET banner_s3_key = $1, updated_at = now() WHERE id = $2',
+            [s3Key, id]
+        );
+
+        await recordAudit(client, {
+            adminId: req.admin.adminId,
+            action: 'update',
+            entityType: 'event',
+            entityId: id,
+            changes: { banner_s3_key: { from: before.banner_s3_key, to: s3Key } }
+        });
+
+        await client.query('COMMIT');
+
+        const bannerUrl = await getPhotoViewUrl(s3Key);
+        res.json({ bannerUrl });
+
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('PATCH /admin/events/:id/banner error:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        client.release();
+    }
+});
+
+// PUT /admin/events/:id/gallery
+// Replaces the entire gallery — delete-and-reinsert in a transaction, same
+// pattern as profile photos. Max 5, positions 0-4, all-or-nothing S3
+// verification before anything is saved.
+adminEventsRouter.put('/:id/gallery', async (req, res) => {
+    const { id } = req.params;
+    const { photos } = req.body;
+
+    if (!Array.isArray(photos) || photos.length > 5) {
+        return res.status(400).json({ error: 'Provide at most 5 photos' });
+    }
+    for (const photo of photos) {
+        if (!photo.s3Key) {
+            return res.status(400).json({ error: 'Each photo must have an s3Key' });
+        }
+        if (!Number.isInteger(photo.position) || photo.position < 0 || photo.position > 4) {
+            return res.status(400).json({ error: 'Each photo must have a position between 0 and 4' });
+        }
+    }
+    const positions = photos.map(p => p.position);
+    if (new Set(positions).size !== positions.length) {
+        return res.status(400).json({ error: 'Each photo must have a unique position' });
+    }
+
+    try {
+        const eventCheck = await pool.query('SELECT id FROM events WHERE id = $1', [id]);
+        if (eventCheck.rows.length === 0) {
+            return res.status(404).json({ error: 'Event not found' });
+        }
+
+        // Verify every claimed upload actually landed in S3 before saving
+        // anything. All-or-nothing — a partial gallery is worse than
+        // rejecting the whole request.
+        for (const photo of photos) {
+            const exists = await objectExists(photo.s3Key);
+            if (!exists) {
+                return res.status(400).json({ error: 'One or more images were not uploaded successfully. Please try again.' });
+            }
+        }
+    } catch (err) {
+        console.error('PUT /admin/events/:id/gallery verification error:', err.message);
+        return res.status(500).json({ error: 'Internal server error' });
+    }
+
+    const client = await pool.connect();
+
+    try {
+        await client.query('BEGIN');
+
+        await client.query('DELETE FROM event_photos WHERE event_id = $1', [id]);
+
+        for (const photo of photos) {
+            await client.query(
+                'INSERT INTO event_photos (event_id, s3_key, position) VALUES ($1, $2, $3)',
+                [id, photo.s3Key, photo.position]
+            );
+        }
+
+        await recordAudit(client, {
+            adminId: req.admin.adminId,
+            action: 'update',
+            entityType: 'event',
+            entityId: id,
+            changes: { gallery: { to: photos.map(p => ({ s3Key: p.s3Key, position: p.position })) } }
+        });
+
+        await client.query('COMMIT');
+
+        const viewUrls = await getPhotoViewUrls(photos.map(p => p.s3Key));
+        res.json({
+            gallery: photos
+                .slice()
+                .sort((a, b) => a.position - b.position)
+                .map(p => ({ url: viewUrls[p.s3Key], position: p.position }))
+        });
+
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('PUT /admin/events/:id/gallery error:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        client.release();
+    }
+});
+
+export default adminEventsRouter;

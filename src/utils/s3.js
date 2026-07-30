@@ -42,6 +42,35 @@ export async function createProfilePhotoUploadUrl(userId, contentType) {
 }
 
 /**
+ * Generates a presigned PUT URL for an event image (banner or gallery).
+ * Same server-generated-key pattern as profile photos — the client never
+ * chooses where the file lands.
+ *
+ * @param {string} eventId
+ * @param {'banner'|'gallery'} kind
+ * @param {string} contentType
+ * @returns {{ uploadUrl, key }} the URL to PUT to, and the key to store later
+ */
+export async function createEventImageUploadUrl(eventId, kind, contentType) {
+    const ext = ALLOWED_TYPES[contentType];
+    if (!ext) {
+        throw new Error('UNSUPPORTED_TYPE');
+    }
+
+    // events/{eventId}/{kind}/{uuid}.{ext} — namespaced per event and kind
+    const key = `events/${eventId}/${kind}/${randomUUID()}.${ext}`;
+
+    const command = new PutObjectCommand({
+        Bucket:      S3_BUCKET,
+        Key:         key,
+        ContentType: contentType
+    });
+
+    const uploadUrl = await getSignedUrl(s3, command, { expiresIn: UPLOAD_URL_TTL });
+    return { uploadUrl, key };
+}
+
+/**
  * Verifies an object actually exists in the bucket.
  * Called before saving a key to the DB — the client claims "I uploaded it,"
  * and this confirms the file genuinely landed rather than trusting the client.

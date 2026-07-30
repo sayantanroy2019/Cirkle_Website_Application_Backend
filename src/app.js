@@ -16,6 +16,8 @@ import vibesRouter from './routes/vibes.js';
 import uploadsRouter from './routes/uploads.js';
 import adminAuthRouter from './routes/adminAuth.js';
 import adminAdminsRouter from './routes/adminAdmins.js';
+import adminOrganizersRouter from './routes/adminOrganizers.js';
+import adminEventsRouter from './routes/adminEvents.js';
 import errorHandler from './middlewares/errorHandler.js';
 
 export function createApp() {
@@ -54,6 +56,8 @@ export function createApp() {
   app.use('/uploads', uploadsRouter);
   app.use('/admin/auth', adminAuthRouter);
   app.use('/admin/admins', adminAdminsRouter);
+  app.use('/admin/organizers', adminOrganizersRouter);
+  app.use('/admin/events', adminEventsRouter);
 
 
   app.get('/health', (req, res) => {

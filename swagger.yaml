@@ -52,6 +52,10 @@ tags:
     description: Email/password login for internal staff (admins). Separate identity space and JWT secret from attendee auth — an attendee token can never authenticate here, and vice versa.
   - name: Admin — Admins
     description: Admin account management. Restricted to admins with the manage_admins capability (role administrative) — a business_development admin gets 403 on every endpoint in this section.
+  - name: Admin — Organizers
+    description: Organizer account management. Both admin roles (administrative, business_development) may use every endpoint here.
+  - name: Admin — Events
+    description: Event creation, editing, and images (banner + gallery). Both admin roles may use every endpoint here. Every mutation writes an audit_log row.
 
 paths:
 
@@ -850,6 +854,611 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /admin/organizers:
+    post:
+      tags: [Admin — Organizers]
+      summary: Onboard a new organizer
+      description: Creates an organizer account. The admin hands the credentials to the organizer out of band. Writes an audit_log row (action create, entity_type organizer).
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, displayName]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 8
+                displayName:
+                  type: string
+                  description: Business name shown in the organizer dashboard
+      responses:
+        '201':
+          description: Organizer created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  organizer:
+                    $ref: '#/components/schemas/Organizer'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: An organizer with this email already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags: [Admin — Organizers]
+      summary: List all organizers
+      description: Each organizer includes an eventCount.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: List of organizers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  organizers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Organizer'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/organizers/{id}:
+    get:
+      tags: [Admin — Organizers]
+      summary: Get one organizer's detail
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Organizer detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  organizer:
+                    $ref: '#/components/schemas/Organizer'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Organizer not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    patch:
+      tags: [Admin — Organizers]
+      summary: Update an organizer
+      description: |
+        Partial update. Including `password` re-hashes and resets the organizer's login — this is how an admin resets a forgotten password. `isActive: false` disables their login without deleting the account.
+
+        Writes an audit_log row with only the fields that actually changed (`{ field: { from, to } }`). If password was changed, the audit records that a password was set, never its value.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                displayName:
+                  type: string
+                email:
+                  type: string
+                  format: email
+                isActive:
+                  type: boolean
+                password:
+                  type: string
+                  minLength: 8
+                  description: Optional — resets the organizer's password when present
+      responses:
+        '200':
+          description: Organizer updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  organizer:
+                    $ref: '#/components/schemas/Organizer'
+        '400':
+          description: Validation error, or no fields provided to update
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Organizer not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: The new email is already taken by another organizer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/events:
+    post:
+      tags: [Admin — Events]
+      summary: Create an event
+      description: |
+        No images at creation — a new event needs an id before images can be keyed to `events/{eventId}/...`. Upload the banner/gallery afterward via the endpoints below, using the returned id.
+
+        Writes an audit_log row (action create, entity_type event).
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, categoryId, cityId, startsAt, price, targetGroupSize]
+              properties:
+                name:
+                  type: string
+                categoryId:
+                  type: string
+                  example: club
+                cityId:
+                  type: string
+                  example: del
+                startsAt:
+                  type: string
+                  format: date-time
+                  description: Must be in the future
+                endsAt:
+                  type: string
+                  format: date-time
+                  nullable: true
+                price:
+                  type: integer
+                  description: Paise, ₹500 = 50000
+                capacity:
+                  type: integer
+                  nullable: true
+                  description: Omit or null for uncapped
+                targetGroupSize:
+                  type: integer
+                eventType:
+                  type: string
+                  enum: [open, invite_only]
+                  description: Defaults to open
+                venueName:
+                  type: string
+                  nullable: true
+                venueAddress:
+                  type: string
+                  nullable: true
+                description:
+                  type: string
+                  nullable: true
+                organizerId:
+                  type: string
+                  format: uuid
+                  nullable: true
+                  description: Omit or null to leave unassigned — an admin can reassign later
+      responses:
+        '201':
+          description: Event created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  event:
+                    $ref: '#/components/schemas/AdminEvent'
+        '400':
+          description: Validation error (missing required field, invalid categoryId/cityId/organizerId, startsAt not in the future, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags: [Admin — Events]
+      summary: List all events
+      description: List view includes a presigned bannerUrl (batch-signed) but not the gallery — that's detail-only.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: organizerId
+          schema:
+            type: string
+            format: uuid
+          required: false
+        - in: query
+          name: cityId
+          schema:
+            type: string
+          required: false
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [upcoming, past]
+          required: false
+      responses:
+        '200':
+          description: List of events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AdminEvent'
+        '400':
+          description: Invalid status value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/events/{id}:
+    get:
+      tags: [Admin — Events]
+      summary: Get full event detail
+      description: Includes presigned bannerUrl, the full gallery (presigned URLs), and the linked organizer.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Event detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  event:
+                    $ref: '#/components/schemas/AdminEvent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    patch:
+      tags: [Admin — Events]
+      summary: Edit an event
+      description: |
+        Partial update — any field editable, including price and capacity even after tickets are sold.
+
+        **Editing price/capacity does NOT retroactively affect existing orders or tickets** — those freeze their price breakdown at purchase time and never re-read this row. Edits only affect future buyers.
+
+        `startsAt` is only validated as future when it's actually present in the request body — so other fields stay editable on events that have already started.
+
+        Writes an audit_log row with only the fields that actually changed.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                categoryId:
+                  type: string
+                cityId:
+                  type: string
+                startsAt:
+                  type: string
+                  format: date-time
+                  description: Validated as future only when present in the body
+                endsAt:
+                  type: string
+                  format: date-time
+                  nullable: true
+                price:
+                  type: integer
+                capacity:
+                  type: integer
+                  nullable: true
+                targetGroupSize:
+                  type: integer
+                eventType:
+                  type: string
+                  enum: [open, invite_only]
+                venueName:
+                  type: string
+                  nullable: true
+                venueAddress:
+                  type: string
+                  nullable: true
+                description:
+                  type: string
+                  nullable: true
+                organizerId:
+                  type: string
+                  format: uuid
+                  nullable: true
+      responses:
+        '200':
+          description: Event updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  event:
+                    $ref: '#/components/schemas/AdminEvent'
+        '400':
+          description: Validation error, or no fields provided to update
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/events/{id}/image-url:
+    post:
+      tags: [Admin — Events]
+      summary: Get a presigned upload URL for an event image
+      description: |
+        Same handshake as profile photos: call this, PUT the file bytes directly to the returned uploadUrl, then attach the returned key via PATCH .../banner or PUT .../gallery below.
+
+        Key is server-generated: `events/{eventId}/{kind}/{uuid}.{ext}`.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contentType, kind]
+              properties:
+                contentType:
+                  type: string
+                  enum: [image/jpeg, image/png, image/webp]
+                kind:
+                  type: string
+                  enum: [banner, gallery]
+      responses:
+        '200':
+          description: Presigned upload URL issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uploadUrl:
+                    type: string
+                    description: PUT the file here directly. Expires in 5 minutes.
+                  key:
+                    type: string
+        '400':
+          description: Missing/unsupported contentType, or invalid kind
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/events/{id}/banner:
+    patch:
+      tags: [Admin — Events]
+      summary: Set the event banner
+      description: Verifies the object exists in S3 (HeadObject) before saving — the client claiming an upload happened isn't trusted. Writes an audit_log row with the from/to key.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [s3Key]
+              properties:
+                s3Key:
+                  type: string
+                  description: The key returned by POST .../image-url, after the file has been PUT to S3
+      responses:
+        '200':
+          description: Banner set
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bannerUrl:
+                    type: string
+                    description: Presigned view URL for the new banner
+        '400':
+          description: Missing s3Key, or the image was not found in S3
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: The image was not uploaded successfully. Please try again.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/events/{id}/gallery:
+    put:
+      tags: [Admin — Events]
+      summary: Replace the event gallery
+      description: |
+        Replaces the entire gallery — delete-and-reinsert in a transaction, same pattern as profile photos. Max 5 photos, positions 0-4, no duplicate positions.
+
+        All-or-nothing S3 verification: if any key wasn't actually uploaded, the whole request is rejected and nothing is saved (existing gallery untouched).
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [photos]
+              properties:
+                photos:
+                  type: array
+                  maxItems: 5
+                  items:
+                    type: object
+                    required: [s3Key, position]
+                    properties:
+                      s3Key:
+                        type: string
+                      position:
+                        type: integer
+                        minimum: 0
+                        maximum: 4
+      responses:
+        '200':
+          description: Gallery replaced
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  gallery:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        url:
+                          type: string
+                        position:
+                          type: integer
+        '400':
+          description: More than 5 photos, invalid/duplicate positions, or one or more images not found in S3
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   # ─── ONBOARDING ───────────────────────────────────────────────────────
 
   /onboarding/status:
@@ -1447,6 +2056,115 @@ components:
           type: string
           format: date-time
 
+    Organizer:
+      type: object
+      description: password_hash is never included in any response.
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          example: organizer@venue.com
+        displayName:
+          type: string
+          example: Kitty Su
+          description: Business name shown in the organizer dashboard
+        isActive:
+          type: boolean
+          description: Kill switch — disables login without deleting the account
+        createdAt:
+          type: string
+          format: date-time
+        eventCount:
+          type: integer
+          description: Present on GET /admin/organizers and GET /admin/organizers/{id}, absent on create
+
+    AdminEvent:
+      type: object
+      description: The admin's view of an event — includes fields not exposed to attendees (capacity, organizerId, timestamps).
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        categoryId:
+          type: string
+        cityId:
+          type: string
+        startsAt:
+          type: string
+          format: date-time
+        endsAt:
+          type: string
+          format: date-time
+          nullable: true
+        price:
+          type: integer
+          description: Paise
+        capacity:
+          type: integer
+          nullable: true
+          description: Null = uncapped
+        targetGroupSize:
+          type: integer
+        eventType:
+          type: string
+          enum: [open, invite_only]
+        venueName:
+          type: string
+          nullable: true
+        venueAddress:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        organizerId:
+          type: string
+          format: uuid
+          nullable: true
+        organizerName:
+          type: string
+          nullable: true
+          description: Present on GET /admin/events (list) only
+        organizer:
+          type: object
+          nullable: true
+          description: Present on GET /admin/events/{id} (detail) only
+          properties:
+            id:
+              type: string
+              format: uuid
+            email:
+              type: string
+            displayName:
+              type: string
+        bannerUrl:
+          type: string
+          nullable: true
+          description: Presigned GET URL, ~1 hour TTL
+        gallery:
+          type: array
+          description: Present on GET /admin/events/{id} (detail) only
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              url:
+                type: string
+              position:
+                type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
     City:
       type: object
       properties:
@@ -1578,9 +2296,23 @@ components:
         description:
           type: string
           nullable: true
-        bannerS3Key:
+        bannerUrl:
           type: string
           nullable: true
+          description: Presigned GET URL, ~1 hour TTL. Never a raw S3 key — the bucket is private. Generated fresh on every read.
+        gallery:
+          type: array
+          description: Up to 5 additional images, separate from the banner. Only present on GET /events/{id}, not the list endpoint.
+          items:
+            type: object
+            properties:
+              url:
+                type: string
+                description: Presigned GET URL, same TTL/freshness rules as bannerUrl
+              position:
+                type: integer
+                minimum: 0
+                maximum: 4
         userHasTicket:
           type: boolean
           description: Whether the requesting user already holds a ticket to this event (only present on GET /events/{id})

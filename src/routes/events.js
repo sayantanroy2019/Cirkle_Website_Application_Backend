@@ -1,6 +1,7 @@
 import express from 'express';
 import {pool}    from '../config/db.js';
 import authenticate from '../middlewares/auth.js';
+import { getPhotoViewUrls } from '../utils/s3.js';
 
 const eventsRouter = express.Router();
 
@@ -81,6 +82,10 @@ eventsRouter.get('/', authenticate, async (req, res) => {
             values
         );
 
+        // Bucket is private — sign all banner keys in one batch rather than per-event
+        const bannerKeys = eventsResult.rows.map(e => e.banner_s3_key).filter(Boolean);
+        const viewUrls = await getPhotoViewUrls(bannerKeys);
+
         res.json({
             events: eventsResult.rows.map(e => ({
                 id:              e.id,
@@ -94,7 +99,7 @@ eventsRouter.get('/', authenticate, async (req, res) => {
                 venueName:       e.venue_name,
                 venueAddress:    e.venue_address,
                 description:     e.description,
-                bannerS3Key:     e.banner_s3_key
+                bannerUrl:       e.banner_s3_key ? viewUrls[e.banner_s3_key] : null
             }))
         });
 
@@ -165,6 +170,16 @@ eventsRouter.get('/:id', authenticate, async (req, res) => {
             invitationStatus = inv.rows.length > 0 ? inv.rows[0].status : null;
         }
 
+        // Gallery — up to 5 additional images, separate from the single banner
+        const galleryResult = await pool.query(
+            'SELECT s3_key, position FROM event_photos WHERE event_id = $1 ORDER BY position ASC',
+            [id]
+        );
+
+        // Bucket is private — sign banner + gallery keys in one batch
+        const allKeys = [e.banner_s3_key, ...galleryResult.rows.map(p => p.s3_key)].filter(Boolean);
+        const viewUrls = await getPhotoViewUrls(allKeys);
+
         res.json({
             event: {
                 id:              e.id,
@@ -178,7 +193,11 @@ eventsRouter.get('/:id', authenticate, async (req, res) => {
                 venueName:       e.venue_name,
                 venueAddress:    e.venue_address,
                 description:     e.description,
-                bannerS3Key:     e.banner_s3_key,
+                bannerUrl:       e.banner_s3_key ? viewUrls[e.banner_s3_key] : null,
+                gallery:         galleryResult.rows.map(p => ({
+                    url:      viewUrls[p.s3_key],
+                    position: p.position
+                })),
                 userHasTicket,
                 soldOut,
                 eventType:        e.event_type,

@@ -2416,9 +2416,10 @@ components:
               type: string
             venueAddress:
               type: string
-            bannerS3Key:
+            bannerUrl:
               type: string
               nullable: true
+              description: Presigned GET URL, ~1 hour TTL. Never a raw S3 key — the bucket is private. Null if the event has no banner.
 
     TicketDetail:
       type: object
@@ -2456,9 +2457,10 @@ components:
               type: string
             venueAddress:
               type: string
-            bannerS3Key:
+            bannerUrl:
               type: string
               nullable: true
+              description: Presigned GET URL, ~1 hour TTL. Never a raw S3 key — the bucket is private. Null if the event has no banner.
 
     VibeCard:
       type: object

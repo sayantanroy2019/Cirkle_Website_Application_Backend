@@ -1,6 +1,7 @@
 import express from 'express';
 import { pool } from '../config/db.js';
 import authenticate from '../middlewares/auth.js';
+import { getPhotoViewUrl, getPhotoViewUrls } from '../utils/s3.js';
 
 const ticketsRouter = express.Router();
 
@@ -38,6 +39,10 @@ ticketsRouter.get('/', authenticate, async (req, res) => {
             [req.user.userId]
         );
 
+        // Bucket is private — sign all banner keys in one batch rather than per-ticket
+        const bannerKeys = result.rows.map(t => t.banner_s3_key).filter(Boolean);
+        const viewUrls = await getPhotoViewUrls(bannerKeys);
+
         res.json({
             tickets: result.rows.map(t => ({
                 id:            t.id,
@@ -50,7 +55,7 @@ ticketsRouter.get('/', authenticate, async (req, res) => {
                     startsAt:     t.starts_at,
                     venueName:    t.venue_name,
                     venueAddress: t.venue_address,
-                    bannerS3Key:  t.banner_s3_key
+                    bannerUrl:    t.banner_s3_key ? viewUrls[t.banner_s3_key] : null
                 }
             }))
         });
@@ -94,6 +99,9 @@ ticketsRouter.get('/:id', authenticate, async (req, res) => {
 
         const t = result.rows[0];
 
+        // Bucket is private — null-safe, since not every event has a banner
+        const bannerUrl = t.banner_s3_key ? await getPhotoViewUrl(t.banner_s3_key) : null;
+
         res.json({
             ticket: {
                 id:          t.id,
@@ -108,7 +116,7 @@ ticketsRouter.get('/:id', authenticate, async (req, res) => {
                     startsAt:     t.starts_at,
                     venueName:    t.venue_name,
                     venueAddress: t.venue_address,
-                    bannerS3Key:  t.banner_s3_key
+                    bannerUrl
                 }
             }
         });

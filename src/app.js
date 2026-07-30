@@ -14,6 +14,8 @@ import ticketsRouter from './routes/tickets.js';
 import couponsRouter from './routes/coupons.js';
 import vibesRouter from './routes/vibes.js';
 import uploadsRouter from './routes/uploads.js';
+import adminAuthRouter from './routes/adminAuth.js';
+import adminAdminsRouter from './routes/adminAdmins.js';
 import errorHandler from './middlewares/errorHandler.js';
 
 export function createApp() {
@@ -50,6 +52,8 @@ export function createApp() {
   app.use('/coupons', couponsRouter);
   app.use('/vibes', vibesRouter);
   app.use('/uploads', uploadsRouter);
+  app.use('/admin/auth', adminAuthRouter);
+  app.use('/admin/admins', adminAdminsRouter);
 
 
   app.get('/health', (req, res) => {

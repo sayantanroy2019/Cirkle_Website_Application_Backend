@@ -205,7 +205,7 @@ eventsRouter.post('/:id/invitations', authenticate, async (req, res) => {
     try {
         // Event must exist and be invite-only
         const eventResult = await pool.query(
-            'SELECT id, event_type FROM events WHERE id = $1',
+            'SELECT id, event_type, organizer_id FROM events WHERE id = $1',
             [eventId]
         );
 
@@ -222,10 +222,10 @@ eventsRouter.post('/:id/invitations', authenticate, async (req, res) => {
         // the existing status rather than a raw 500.
         try {
             const inserted = await pool.query(
-                `INSERT INTO event_invitations (user_id, event_id, status)
-                 VALUES ($1, $2, 'pending')
+                `INSERT INTO event_invitations (user_id, event_id, organizer_id, status)
+                 VALUES ($1, $2, $3, 'pending')
                  RETURNING status`,
-                [userId, eventId]
+                [userId, eventId, eventResult.rows[0].organizer_id]
             );
             return res.status(201).json({ status: inserted.rows[0].status });
 

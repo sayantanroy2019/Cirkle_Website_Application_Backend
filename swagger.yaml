@@ -48,6 +48,10 @@ tags:
     description: Social-proof discovery feed. One card per upcoming ticket held by someone else, ranked by gender/city tiers.
   - name: Uploads
     description: Presigned S3 upload handshake for profile photos. The bucket is private — uploads go straight to S3, never through this backend.
+  - name: Admin Auth
+    description: Email/password login for internal staff (admins). Separate identity space and JWT secret from attendee auth — an attendee token can never authenticate here, and vice versa.
+  - name: Admin — Admins
+    description: Admin account management. Restricted to admins with the manage_admins capability (role administrative) — a business_development admin gets 403 on every endpoint in this section.
 
 paths:
 
@@ -641,6 +645,211 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  # ─── ADMIN ────────────────────────────────────────────────────────────
+
+  /admin/auth/login:
+    post:
+      tags: [Admin Auth]
+      summary: Admin login
+      description: |
+        Email/password login for admins. Separate identity space from attendee phone auth — signed with a distinct secret (ADMIN_JWT_SECRET), so this token can never authenticate against attendee routes and an attendee token can never authenticate here.
+
+        Deliberately generic 401 on both "no such email" and "wrong password" — never reveals whether an email exists in the system. Deactivated admins (`is_active = false`) also get the generic 401.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: admin@cirkle.live
+                password:
+                  type: string
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    description: JWT valid for 7 days, signed with ADMIN_JWT_SECRET
+                  admin:
+                    $ref: '#/components/schemas/Admin'
+        '400':
+          description: Missing or malformed email/password
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Invalid credentials, or the account is deactivated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Invalid credentials
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/admins:
+    post:
+      tags: [Admin — Admins]
+      summary: Create an admin account
+      description: |
+        Creates a new admin (business_development or administrative). This is how administrative admins create BD team accounts.
+
+        Requires the manage_admins capability — a business_development admin gets 403.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, displayName, role]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 8
+                displayName:
+                  type: string
+                role:
+                  type: string
+                  enum: [administrative, business_development]
+      responses:
+        '201':
+          description: Admin created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  admin:
+                    $ref: '#/components/schemas/Admin'
+        '400':
+          description: Validation error (email format, password length, missing displayName, invalid role)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Caller lacks the manage_admins capability (business_development role)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: You do not have permission to manage admin accounts
+        '409':
+          description: An admin with this email already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags: [Admin — Admins]
+      summary: List all admins
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: List of admin accounts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  admins:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Admin'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Caller lacks the manage_admins capability
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/admins/{id}:
+    patch:
+      tags: [Admin — Admins]
+      summary: Update an admin account
+      description: |
+        Partial update — only fields present in the body are changed. Commonly used to deactivate an admin (`isActive: false`), which invalidates their existing token immediately (authenticateAdmin re-checks is_active on every request, not just at token issuance).
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                displayName:
+                  type: string
+                role:
+                  type: string
+                  enum: [administrative, business_development]
+                isActive:
+                  type: boolean
+      responses:
+        '200':
+          description: Admin updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  admin:
+                    $ref: '#/components/schemas/Admin'
+        '400':
+          description: Validation error, or no fields provided to update
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Caller lacks the manage_admins capability
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Admin not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   # ─── ONBOARDING ───────────────────────────────────────────────────────
 
   /onboarding/status:
@@ -1213,6 +1422,30 @@ components:
         error:
           type: string
           example: Error message here
+
+    Admin:
+      type: object
+      description: password_hash is never included in any response.
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          example: admin@cirkle.live
+        displayName:
+          type: string
+          example: Founder Admin
+        role:
+          type: string
+          enum: [administrative, business_development]
+          description: Only capability difference is manage_admins — administrative has it, business_development doesn't. Otherwise identical access.
+        isActive:
+          type: boolean
+          description: Kill switch. A deactivated admin's existing token stops working immediately, not just at expiry. Absent from the login response (implied true — login already checked it).
+        createdAt:
+          type: string
+          format: date-time
 
     City:
       type: object

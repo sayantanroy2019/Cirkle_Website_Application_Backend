@@ -14,14 +14,20 @@ import ticketsRouter from './routes/tickets.js';
 import couponsRouter from './routes/coupons.js';
 import vibesRouter from './routes/vibes.js';
 import uploadsRouter from './routes/uploads.js';
+import errorHandler from './middlewares/errorHandler.js';
 
 export function createApp() {
   const app = express();
 
   app.use(cors(
     {
-      origin: ["http://localhost:5173", "http://localhost:5174"],
+      origin: [
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "https://cirkle-website-application-frontend.vercel.app"
+      ],
       credentials: true,
+      allowedHeaders: ["Content-Type", "Authorization", "ngrok-skip-browser-warning"],
     }
   ));
   app.use(express.json({
@@ -66,11 +72,8 @@ export function createApp() {
     res.status(404).json({ error: 'Not found' });
   });
 
-  // Error handler
-  app.use((err, req, res, next) => {
-    console.error(err);
-    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
-  });
+  // Error handler — must be last
+  app.use(errorHandler);
 
   return app;
 }

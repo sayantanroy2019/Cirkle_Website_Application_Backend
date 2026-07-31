@@ -56,6 +56,21 @@ tags:
     description: Organizer account management. Both admin roles (administrative, business_development) may use every endpoint here.
   - name: Admin — Events
     description: Event creation, editing, and images (banner + gallery). Both admin roles may use every endpoint here. Every mutation writes an audit_log row.
+  - name: Admin — Orders
+    description: Read-only order oversight. Both admin roles. Every list endpoint is paginated.
+  - name: Admin — Tickets
+    description: Read-only ticket oversight — filter by event for the venue guest list. Both admin roles.
+  - name: Admin — Revenue
+    description: Aggregate money views computed only from paid orders. Both admin roles.
+  - name: Admin — Invitations
+    description: Global read-only view of all invitation activity across every organizer. Both admin roles.
+  - name: Admin — Users
+    description: Read-only user oversight and the support-lookup screen. Both admin roles. Phone and email are unmasked PII for now — see the Admin — Users schema notes.
+  - name: Organizer
+    description: |
+      The organizer-facing dashboard: read-only event/attendee/invitation views scoped to the logged-in organizer, plus one write action (invitation accept/reject). Separate identity space and JWT secret (ORGANIZER_JWT_SECRET) from both attendee and admin auth.
+
+      Attendee and invitation responses NEVER include phone or email — organizers get profile cards only. Cirkle handles all attendee communication.
 
 paths:
 
@@ -1459,6 +1474,696 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  # ─── ADMIN OVERSIGHT (read-only) ───────────────────────────────────────
+
+  /admin/orders:
+    get:
+      tags: [Admin — Orders]
+      summary: List orders
+      description: Filterable and combinable. Includes the full frozen price breakdown plus light event/user context for support lookup.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [created, paid, failed, expired, refunded]
+          required: false
+        - in: query
+          name: eventId
+          schema:
+            type: string
+            format: uuid
+          required: false
+        - in: query
+          name: userId
+          schema:
+            type: string
+            format: uuid
+          required: false
+        - in: query
+          name: from
+          schema:
+            type: string
+            format: date
+          required: false
+          description: Lower bound on created_at (inclusive)
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date
+          required: false
+          description: Upper bound on created_at (inclusive)
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Paginated list of orders
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PaginationEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AdminOrder'
+        '400':
+          description: Invalid status value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/orders/{id}:
+    get:
+      tags: [Admin — Orders]
+      summary: Get full order detail
+      description: Everything from the list view plus the coupon used (if any) and the linked ticket (if the order is paid).
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Order detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  order:
+                    allOf:
+                      - $ref: '#/components/schemas/AdminOrder'
+                      - type: object
+                        properties:
+                          coupon:
+                            type: object
+                            nullable: true
+                            properties:
+                              id:
+                                type: string
+                                format: uuid
+                              code:
+                                type: string
+                              discountFlatPaise:
+                                type: integer
+                          ticket:
+                            type: object
+                            nullable: true
+                            properties:
+                              id:
+                                type: string
+                                format: uuid
+                              bookingRef:
+                                type: string
+                              checkedIn:
+                                type: boolean
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/tickets:
+    get:
+      tags: [Admin — Tickets]
+      summary: List tickets
+      description: Filtered by eventId alone, this is effectively the venue guest list for that event.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: eventId
+          schema:
+            type: string
+            format: uuid
+          required: false
+        - in: query
+          name: checkedIn
+          schema:
+            type: string
+            enum: ['true', 'false']
+          required: false
+        - in: query
+          name: userId
+          schema:
+            type: string
+            format: uuid
+          required: false
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Paginated list of tickets
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PaginationEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AdminTicket'
+        '400':
+          description: checkedIn must be true or false
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/tickets/{id}:
+    get:
+      tags: [Admin — Tickets]
+      summary: Get ticket detail
+      description: Everything from the list view plus which order it came from and the price paid.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Ticket detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ticket:
+                    allOf:
+                      - $ref: '#/components/schemas/AdminTicket'
+                      - type: object
+                        properties:
+                          order:
+                            type: object
+                            properties:
+                              id:
+                                type: string
+                                format: uuid
+                              pricePaidPaise:
+                                type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Ticket not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/revenue:
+    get:
+      tags: [Admin — Revenue]
+      summary: Overall revenue summary
+      description: |
+        Computed only from status='paid' orders — created/failed/expired orders never count.
+
+        Refunded orders are deliberately excluded from the collected totals and surfaced separately as refundedPaise, so the numbers read as "collected X, refunded Y" rather than a netted figure that hides both.
+
+        Math: grossPaise - discountsPaise = netBeforeGstPaise; netBeforeGstPaise + gstCollectedPaise = totalCollectedPaise.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Revenue summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevenueSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/revenue/by-event:
+    get:
+      tags: [Admin — Revenue]
+      summary: Revenue broken down per event
+      description: Same breakdown as GET /admin/revenue, grouped per event — "how is each event performing." Paginated.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Paginated per-event revenue breakdown
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PaginationEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/RevenueByEvent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/invitations:
+    get:
+      tags: [Admin — Invitations]
+      summary: List invitation activity across every organizer
+      description: The global view. The organizer dashboard will later show a scoped (own-events-only) version of this.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: eventId
+          schema:
+            type: string
+            format: uuid
+          required: false
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [pending, accepted, rejected]
+          required: false
+        - in: query
+          name: userId
+          schema:
+            type: string
+            format: uuid
+          required: false
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Paginated list of invitations
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PaginationEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AdminInvitation'
+        '400':
+          description: Invalid status value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/users:
+    get:
+      tags: [Admin — Users]
+      summary: Search and list users
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: search
+          schema:
+            type: string
+          required: false
+          description: Matched case-insensitively, partial, against phone, email, first name, and last name
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Paginated list of users
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PaginationEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AdminUserSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/users/{id}:
+    get:
+      tags: [Admin — Users]
+      summary: Full user detail — the support-lookup screen
+      description: Complete profile (presigned photo URLs, lifestyle tags, bio, tagline), phone, email, derived age, plus full order and ticket history.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Full user detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    $ref: '#/components/schemas/AdminUserDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ─── ORGANIZER DASHBOARD ────────────────────────────────────────────────
+
+  /organizer/auth/login:
+    post:
+      tags: [Organizer]
+      summary: Organizer login
+      description: |
+        Email/password login. Separate identity space from both attendee phone auth and admin auth — signed with a distinct secret (ORGANIZER_JWT_SECRET), so this token can never authenticate against attendee or admin routes, and vice versa.
+
+        Deliberately generic 401 on unknown email, wrong password, or a deactivated account — never reveals which.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    description: JWT valid for 7 days, signed with ORGANIZER_JWT_SECRET
+                  organizer:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      email:
+                        type: string
+                      displayName:
+                        type: string
+        '400':
+          description: Missing or malformed email/password
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Invalid credentials, or the account is deactivated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Invalid credentials
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /organizer/events:
+    get:
+      tags: [Organizer]
+      summary: List this organizer's events
+      description: Scoped to req.organizer.organizerId from the token — never from a request parameter. Only this organizer's events are ever returned.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Paginated list of the organizer's events
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PaginationEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/OrganizerEventSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /organizer/events/{id}:
+    get:
+      tags: [Organizer]
+      summary: Get full detail of one of this organizer's events
+      description: |
+        Ownership-checked — returns 404 (not 403) if the event isn't this organizer's, so existence is never confirmed to someone who shouldn't see it.
+
+        Includes grossSalesPaise: sum of total_paise on paid orders for this event. This is informational only — gross collected, NOT a payout figure. Settlement/payouts are a separate, future feature.
+
+        View-only. There is no PATCH/POST/DELETE here — organizers contact admin to change event details.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Event detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  event:
+                    $ref: '#/components/schemas/OrganizerEventDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Event not found (also returned if it belongs to a different organizer)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /organizer/events/{id}/attendees:
+    get:
+      tags: [Organizer]
+      summary: List ticket-holders for this event (the guest list)
+      description: |
+        Ownership-checked, same 404-not-403 rule as above.
+
+        Profile cards only — first name, last name, age, gender, bio, tagline, lifestyle tags, presigned photo URLs, and check-in status. **Phone and email are never included, not sent and hidden, simply never selected from the database.** Cirkle handles all attendee communication.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Paginated list of attendee profile cards
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PaginationEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/OrganizerAttendee'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Event not found (also returned if it belongs to a different organizer)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /organizer/events/{id}/invitations:
+    get:
+      tags: [Organizer]
+      summary: List invitation requests for this event
+      description: |
+        Ownership-checked, same 404-not-403 rule as above. Filterable by status, defaulting to pending (the actionable set).
+
+        Same profile-card treatment as attendees — no phone/email, ever.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [pending, accepted, rejected]
+            default: pending
+          required: false
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Paginated list of invitation profile cards
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PaginationEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/OrganizerInvitation'
+        '400':
+          description: Invalid status value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Event not found (also returned if it belongs to a different organizer)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /organizer/invitations/{invitationId}/decision:
+    post:
+      tags: [Organizer]
+      summary: Accept or reject an invitation request
+      description: |
+        The one write action in the organizer dashboard. Ownership is checked via event_invitations.organizer_id — 404 if the invitation doesn't belong to this organizer, never 403.
+
+        The invitation must currently be pending. Already-decided invitations (accepted or rejected) are terminal — 409, no un-deciding or re-deciding.
+
+        Accepting flows straight into the existing consumer purchase gate (POST /payments/orders already checks for an accepted invitation) — no change needed there.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: invitationId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision:
+                  type: string
+                  enum: [accept, reject]
+      responses:
+        '200':
+          description: Decision recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invitationId:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    enum: [accepted, rejected]
+        '400':
+          description: decision must be 'accept' or 'reject'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Invitation not found (also returned if it belongs to a different organizer)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: This invitation has already been decided — terminal state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: This invitation has already been accepted
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   # ─── ONBOARDING ───────────────────────────────────────────────────────
 
   /onboarding/status:
@@ -2024,6 +2729,26 @@ components:
       bearerFormat: JWT
       description: JWT token obtained from POST /auth/login. Valid for 7 days.
 
+  parameters:
+    Limit:
+      in: query
+      name: limit
+      schema:
+        type: integer
+        default: 50
+        maximum: 100
+        minimum: 1
+      required: false
+      description: Max rows to return. Default 50, clamped to 100 even if a larger value is requested.
+    Offset:
+      in: query
+      name: offset
+      schema:
+        type: integer
+        default: 0
+        minimum: 0
+      required: false
+
   schemas:
     Error:
       type: object
@@ -2164,6 +2889,496 @@ components:
         updatedAt:
           type: string
           format: date-time
+
+    PaginationEnvelope:
+      type: object
+      description: Shared shape for every list endpoint. `data` is added per-endpoint via allOf.
+      properties:
+        total:
+          type: integer
+          description: Total matching rows, ignoring limit/offset — for "showing X-Y of Z" and page controls
+          example: 3847
+        limit:
+          type: integer
+          example: 50
+        offset:
+          type: integer
+          example: 100
+
+    AdminOrder:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [created, paid, failed, expired, refunded]
+        breakdown:
+          $ref: '#/components/schemas/PriceBreakdown'
+        paymentMethod:
+          type: string
+          nullable: true
+          example: upi
+        paymentMethodDetail:
+          type: string
+          nullable: true
+          example: PhonePe
+        razorpayOrderId:
+          type: string
+        razorpayPaymentId:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        event:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+        user:
+          type: object
+          description: PII — phone is unmasked for now. See Admin — Users schema notes.
+          properties:
+            id:
+              type: string
+              format: uuid
+            firstName:
+              type: string
+              nullable: true
+            phone:
+              type: string
+
+    AdminTicket:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        bookingRef:
+          type: string
+          example: CRKL-7F3A2C9E
+        checkedIn:
+          type: boolean
+        checkedInAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        event:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+            startsAt:
+              type: string
+              format: date-time
+        user:
+          type: object
+          description: PII — phone is unmasked for now.
+          properties:
+            id:
+              type: string
+              format: uuid
+            firstName:
+              type: string
+              nullable: true
+            phone:
+              type: string
+
+    RevenueSummary:
+      type: object
+      description: Computed only from status='paid' orders. grossPaise - discountsPaise = netBeforeGstPaise; netBeforeGstPaise + gstCollectedPaise = totalCollectedPaise.
+      properties:
+        grossPaise:
+          type: integer
+          description: Sum of base_price_paise across paid orders
+        discountsPaise:
+          type: integer
+        netBeforeGstPaise:
+          type: integer
+        gstCollectedPaise:
+          type: integer
+        totalCollectedPaise:
+          type: integer
+          description: What actually hit Razorpay
+        paidOrderCount:
+          type: integer
+        ticketsSold:
+          type: integer
+        refundedPaise:
+          type: integer
+          description: Sum of total_paise across status='refunded' orders. Deliberately NOT subtracted from the collected totals above — shown separately so nothing is hidden.
+
+    RevenueByEvent:
+      type: object
+      description: Same fields as RevenueSummary, scoped to one event.
+      properties:
+        eventId:
+          type: string
+          format: uuid
+        eventName:
+          type: string
+        eventStartsAt:
+          type: string
+          format: date-time
+        grossPaise:
+          type: integer
+        discountsPaise:
+          type: integer
+        netBeforeGstPaise:
+          type: integer
+        gstCollectedPaise:
+          type: integer
+        totalCollectedPaise:
+          type: integer
+        paidOrderCount:
+          type: integer
+        ticketsSold:
+          type: integer
+        refundedPaise:
+          type: integer
+
+    AdminInvitation:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, accepted, rejected]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        event:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+        organizer:
+          type: object
+          nullable: true
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+        user:
+          type: object
+          description: PII — phone is unmasked for now.
+          properties:
+            id:
+              type: string
+              format: uuid
+            firstName:
+              type: string
+              nullable: true
+            age:
+              type: integer
+              nullable: true
+            gender:
+              type: string
+              nullable: true
+            phone:
+              type: string
+
+    AdminUserSummary:
+      type: object
+      description: |
+        PII note: phone and email are returned unmasked to every admin for
+        now. A future view_pii capability will mask these for
+        business_development admins, done server-side. All raw exposure is
+        funneled through two functions in src/routes/adminUsers.js so that
+        change touches one place, not every endpoint.
+      properties:
+        id:
+          type: string
+          format: uuid
+        firstName:
+          type: string
+          nullable: true
+        lastName:
+          type: string
+          nullable: true
+        age:
+          type: integer
+          nullable: true
+        gender:
+          type: string
+          nullable: true
+        cityId:
+          type: string
+          nullable: true
+        phone:
+          type: string
+        email:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        ticketCount:
+          type: integer
+        orderCount:
+          type: integer
+
+    AdminUserDetail:
+      type: object
+      description: Same PII note as AdminUserSummary.
+      properties:
+        id:
+          type: string
+          format: uuid
+        firstName:
+          type: string
+          nullable: true
+        lastName:
+          type: string
+          nullable: true
+        age:
+          type: integer
+          nullable: true
+        gender:
+          type: string
+          nullable: true
+        cityId:
+          type: string
+          nullable: true
+        phone:
+          type: string
+        email:
+          type: string
+          nullable: true
+        bio:
+          type: string
+          nullable: true
+        tagline:
+          type: string
+          nullable: true
+        photos:
+          type: array
+          items:
+            $ref: '#/components/schemas/Photo'
+        lifestyleTags:
+          type: array
+          items:
+            $ref: '#/components/schemas/LifestyleTag'
+        createdAt:
+          type: string
+          format: date-time
+        orders:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              status:
+                type: string
+              totalPaise:
+                type: integer
+              createdAt:
+                type: string
+                format: date-time
+              eventName:
+                type: string
+        tickets:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              bookingRef:
+                type: string
+              checkedIn:
+                type: boolean
+              createdAt:
+                type: string
+                format: date-time
+              eventName:
+                type: string
+              eventStartsAt:
+                type: string
+                format: date-time
+
+    OrganizerEventSummary:
+      type: object
+      description: The organizer's list view of one of their events. View-only.
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        categoryId:
+          type: string
+        cityId:
+          type: string
+        startsAt:
+          type: string
+          format: date-time
+        venueName:
+          type: string
+          nullable: true
+        venueAddress:
+          type: string
+          nullable: true
+        eventType:
+          type: string
+          enum: [open, invite_only]
+        capacity:
+          type: integer
+          nullable: true
+        bannerUrl:
+          type: string
+          nullable: true
+          description: Presigned GET URL, ~1 hour TTL
+        ticketsSold:
+          type: integer
+
+    OrganizerEventDetail:
+      type: object
+      description: Full detail of one of the organizer's events. View-only — no PATCH/POST/DELETE.
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        categoryId:
+          type: string
+        cityId:
+          type: string
+        startsAt:
+          type: string
+          format: date-time
+        endsAt:
+          type: string
+          format: date-time
+          nullable: true
+        price:
+          type: integer
+          description: Paise
+        capacity:
+          type: integer
+          nullable: true
+        targetGroupSize:
+          type: integer
+        eventType:
+          type: string
+          enum: [open, invite_only]
+        venueName:
+          type: string
+          nullable: true
+        venueAddress:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        bannerUrl:
+          type: string
+          nullable: true
+        gallery:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              url:
+                type: string
+              position:
+                type: integer
+        ticketsSold:
+          type: integer
+        grossSalesPaise:
+          type: integer
+          description: Sum of total_paise on paid orders for this event. Gross collected — NOT a payout figure. Settlement/payouts are a separate, future feature.
+
+    OrganizerProfileCard:
+      type: object
+      description: |
+        The base profile-card shape shared by OrganizerAttendee and OrganizerInvitation. Deliberately has NO phone and NO email properties — the backend's fetchAttendeeProfiles() never selects those columns in the first place, so there's nothing to leak even if a serializer bug existed. Organizers get profile cards only; Cirkle handles all attendee communication.
+      properties:
+        userId:
+          type: string
+          format: uuid
+        firstName:
+          type: string
+          nullable: true
+        lastName:
+          type: string
+          nullable: true
+        age:
+          type: integer
+          nullable: true
+        gender:
+          type: string
+          nullable: true
+        bio:
+          type: string
+          nullable: true
+        tagline:
+          type: string
+          nullable: true
+        photos:
+          type: array
+          items:
+            $ref: '#/components/schemas/Photo'
+        lifestyleTags:
+          type: array
+          items:
+            $ref: '#/components/schemas/LifestyleTag'
+
+    OrganizerAttendee:
+      description: A ticket-holder for the organizer's event. No phone/email — see OrganizerProfileCard.
+      allOf:
+        - type: object
+          properties:
+            ticketId:
+              type: string
+              format: uuid
+            checkedIn:
+              type: boolean
+        - $ref: '#/components/schemas/OrganizerProfileCard'
+
+    OrganizerInvitation:
+      description: An invitation request for the organizer's event. No phone/email — see OrganizerProfileCard.
+      allOf:
+        - type: object
+          properties:
+            invitationId:
+              type: string
+              format: uuid
+            status:
+              type: string
+              enum: [pending, accepted, rejected]
+            requestedAt:
+              type: string
+              format: date-time
+        - $ref: '#/components/schemas/OrganizerProfileCard'
 
     City:
       type: object

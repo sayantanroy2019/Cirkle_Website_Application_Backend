@@ -18,6 +18,14 @@ import adminAuthRouter from './routes/adminAuth.js';
 import adminAdminsRouter from './routes/adminAdmins.js';
 import adminOrganizersRouter from './routes/adminOrganizers.js';
 import adminEventsRouter from './routes/adminEvents.js';
+import adminOrdersRouter from './routes/adminOrders.js';
+import adminTicketsRouter from './routes/adminTickets.js';
+import adminRevenueRouter from './routes/adminRevenue.js';
+import adminInvitationsRouter from './routes/adminInvitations.js';
+import adminUsersRouter from './routes/adminUsers.js';
+import organizerAuthRouter from './routes/organizerAuth.js';
+import organizerEventsRouter from './routes/organizerEvents.js';
+import organizerInvitationsRouter from './routes/organizerInvitations.js';
 import errorHandler from './middlewares/errorHandler.js';
 
 export function createApp() {
@@ -58,6 +66,14 @@ export function createApp() {
   app.use('/admin/admins', adminAdminsRouter);
   app.use('/admin/organizers', adminOrganizersRouter);
   app.use('/admin/events', adminEventsRouter);
+  app.use('/admin/orders', adminOrdersRouter);
+  app.use('/admin/tickets', adminTicketsRouter);
+  app.use('/admin/revenue', adminRevenueRouter);
+  app.use('/admin/invitations', adminInvitationsRouter);
+  app.use('/admin/users', adminUsersRouter);
+  app.use('/organizer/auth', organizerAuthRouter);
+  app.use('/organizer/events', organizerEventsRouter);
+  app.use('/organizer/invitations', organizerInvitationsRouter);
 
 
   app.get('/health', (req, res) => {

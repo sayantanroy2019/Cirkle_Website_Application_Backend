@@ -1453,6 +1453,9 @@ paths:
                     items:
                       type: object
                       properties:
+                        s3Key:
+                          type: string
+                          description: Echoed back so the response matches the gallery shape in GET /admin/events/{id}
                         url:
                           type: string
                         position:
@@ -2879,6 +2882,14 @@ components:
               id:
                 type: string
                 format: uuid
+              s3Key:
+                type: string
+                description: >-
+                  Raw stored key. Admin-only — send it back in PUT
+                  /admin/events/{id}/gallery to keep an existing photo, since
+                  that endpoint is a full replace. Consumer responses never
+                  include this.
+                example: events/6f1c.../gallery/9ab2....webp
               url:
                 type: string
               position:

@@ -271,8 +271,12 @@ adminEventsRouter.get('/:id', async (req, res) => {
             event: {
                 ...toResponse(row),
                 bannerUrl: row.banner_s3_key ? viewUrls[row.banner_s3_key] : null,
+                // s3Key is exposed here (admin only) because PUT /gallery is a
+                // full replace — to keep an existing photo the admin has to
+                // send its key back. Consumer responses stay key-free.
                 gallery: galleryResult.rows.map(p => ({
                     id:       p.id,
+                    s3Key:    p.s3_key,
                     url:      viewUrls[p.s3_key],
                     position: p.position
                 })),
@@ -565,7 +569,7 @@ adminEventsRouter.put('/:id/gallery', async (req, res) => {
             gallery: photos
                 .slice()
                 .sort((a, b) => a.position - b.position)
-                .map(p => ({ url: viewUrls[p.s3Key], position: p.position }))
+                .map(p => ({ s3Key: p.s3Key, url: viewUrls[p.s3Key], position: p.position }))
         });
 
     } catch (err) {

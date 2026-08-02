@@ -111,3 +111,44 @@ describe('GET /events', () => {
     });
 
 });
+// ─── GET /events/:id ──────────────────────────────────────────────────
+describe('GET /events/:id', () => {
+
+    let eventId;
+
+    beforeAll(async () => {
+        // Grab a real event ID from the DB to test against
+        const result = await pool.query(
+            'SELECT id FROM events WHERE city_id = $1 LIMIT 1',
+            ['del']
+        );
+        eventId = result.rows[0].id;
+    });
+
+    it('returns 401 with no token', async () => {
+        const res = await request(app).get(`/events/${eventId}`);
+        expect(res.status).toBe(401);
+        expect(res.body.error).toBe('No token provided');
+    });
+
+    it('returns event detail for valid ID', async () => {
+        const res = await request(app)
+            .get(`/events/${eventId}`)
+            .set('Authorization', `Bearer ${token}`);
+        expect(res.status).toBe(200);
+        expect(res.body.event).toBeDefined();
+        expect(res.body.event.id).toBe(eventId);
+        expect(res.body.event.name).toBeDefined();
+        expect(res.body.event.price).toBeDefined();
+        expect(res.body.event.targetGroupSize).toBeDefined();
+    });
+
+    it('returns 404 for non-existent event', async () => {
+        const res = await request(app)
+            .get('/events/00000000-0000-0000-0000-000000000000')
+            .set('Authorization', `Bearer ${token}`);
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Event not found');
+    });
+
+});

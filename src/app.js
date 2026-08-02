@@ -36,6 +36,7 @@ export function createApp() {
       origin: [
         "http://localhost:5173",
         "http://localhost:5174",
+        "http://localhost:5175",
         "https://cirkle-website-application-frontend.vercel.app"
       ],
       credentials: true,

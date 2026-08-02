@@ -343,4 +343,54 @@ describe('Event images — banner and gallery', () => {
         await pool.query("DELETE FROM users WHERE phone = '+916868686869'");
     });
 
+    it('admin detail exposes each gallery item s3Key, matching the stored key', async () => {
+        const res = await request(app)
+            .get(`/admin/events/${eventId}`)
+            .set('Authorization', `Bearer ${adminToken}`);
+        expect(res.status).toBe(200);
+
+        const gallery = res.body.event.gallery;
+        expect(gallery.length).toBe(2);
+        for (const item of gallery) {
+            expect(item.s3Key).toMatch(new RegExp(`^events/${eventId}/gallery/`));
+            expect(item.url).toMatch(/^https:\/\//);
+        }
+
+        const db = await pool.query(
+            'SELECT s3_key, position FROM event_photos WHERE event_id = $1 ORDER BY position ASC',
+            [eventId]
+        );
+        expect(gallery.map(g => [g.s3Key, g.position]))
+            .toEqual(db.rows.map(r => [r.s3_key, r.position]));
+    });
+
+    // The round-trip this s3Key exists for: adding a photo without re-uploading
+    // the existing ones. PUT /gallery is a full replace, so the admin has to
+    // send back the keys it just read from the detail response.
+    it('gallery round-trips — detail s3Keys can be resent to preserve existing photos', async () => {
+        const before = await request(app)
+            .get(`/admin/events/${eventId}`)
+            .set('Authorization', `Bearer ${adminToken}`);
+        const existing = before.body.event.gallery;
+        expect(existing.length).toBe(2);
+
+        const newKey = await uploadTestImage(eventId, 'gallery');
+
+        const put = await request(app)
+            .put(`/admin/events/${eventId}/gallery`)
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ photos: [
+                ...existing.map(p => ({ s3Key: p.s3Key, position: p.position })),
+                { s3Key: newKey, position: 2 }
+            ]});
+        expect(put.status).toBe(200);
+        expect(put.body.gallery.length).toBe(3);
+
+        const after = await request(app)
+            .get(`/admin/events/${eventId}`)
+            .set('Authorization', `Bearer ${adminToken}`);
+        expect(after.body.event.gallery.map(p => p.s3Key))
+            .toEqual([existing[0].s3Key, existing[1].s3Key, newKey]);
+    });
+
 });

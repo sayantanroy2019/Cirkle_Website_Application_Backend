@@ -3373,6 +3373,12 @@ components:
               format: uuid
             checkedIn:
               type: boolean
+              description: Convenience flag — true when checkedInAt is non-null.
+            checkedInAt:
+              type: string
+              format: date-time
+              nullable: true
+              description: When the attendee was checked in at the door, or null if they haven't been.
         - $ref: '#/components/schemas/OrganizerProfileCard'
 
     OrganizerInvitation:

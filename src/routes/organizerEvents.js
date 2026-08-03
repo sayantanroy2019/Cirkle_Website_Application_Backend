@@ -161,8 +161,9 @@ organizerEventsRouter.get('/:id/attendees', async (req, res) => {
         const profiles = await fetchAttendeeProfiles(userIds);
 
         const data = ticketsResult.rows.map(t => ({
-            ticketId:  t.ticket_id,
-            checkedIn: t.checked_in_at !== null,
+            ticketId:    t.ticket_id,
+            checkedIn:   t.checked_in_at !== null,
+            checkedInAt: t.checked_in_at,
             ...profiles[t.user_id]
         }));
 

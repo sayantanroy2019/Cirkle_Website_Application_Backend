@@ -246,6 +246,7 @@ describe('GET /organizer/events/:id/attendees — PII leak test (the highest-ris
         const card = res.body.data.find(a => a.userId === attendeeUserId);
         expect(card).toBeDefined();
         expect(card.checkedIn).toBe(false);
+        expect(card.checkedInAt).toBeNull();
         expect(card.firstName).toBe('Attendee');
         expect(Array.isArray(card.photos)).toBe(true);
 
@@ -256,6 +257,30 @@ describe('GET /organizer/events/:id/attendees — PII leak test (the highest-ris
         expect(raw).not.toContain(ATTENDEE_PHONE);
         expect(raw).not.toContain(ATTENDEE_EMAIL);
         expect(raw).not.toMatch(/"phone"|"email"/);
+    });
+
+    it('returns the real checked_in_at timestamp once the attendee is checked in — and still leaks no PII', async () => {
+        const before = await request(app).get(`/organizer/events/${eventAId}/attendees`).set('Authorization', `Bearer ${orgAToken}`);
+        const ticketId = before.body.data.find(a => a.userId === attendeeUserId).ticketId;
+
+        const checkInTime = new Date('2026-02-01T21:42:00Z');
+        await pool.query('UPDATE tickets SET checked_in_at = $1 WHERE id = $2', [checkInTime, ticketId]);
+
+        const res = await request(app).get(`/organizer/events/${eventAId}/attendees`).set('Authorization', `Bearer ${orgAToken}`);
+        expect(res.status).toBe(200);
+
+        const card = res.body.data.find(a => a.userId === attendeeUserId);
+        expect(card.checkedIn).toBe(true);
+        expect(card.checkedInAt).not.toBeNull();
+        expect(new Date(card.checkedInAt).toISOString()).toBe(checkInTime.toISOString());
+
+        // The extra field must not have widened the response — same PII grep.
+        const raw = JSON.stringify(res.body);
+        expect(raw).not.toContain(ATTENDEE_PHONE);
+        expect(raw).not.toContain(ATTENDEE_EMAIL);
+        expect(raw).not.toMatch(/"phone"|"email"/);
+
+        await pool.query('UPDATE tickets SET checked_in_at = NULL WHERE id = $1', [ticketId]);
     });
 
 });

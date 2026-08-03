@@ -3357,11 +3357,42 @@ components:
         photos:
           type: array
           items:
-            $ref: '#/components/schemas/Photo'
+            $ref: '#/components/schemas/CardPhoto'
         lifestyleTags:
           type: array
           items:
-            $ref: '#/components/schemas/LifestyleTag'
+            $ref: '#/components/schemas/CardLifestyleTag'
+
+    CardPhoto:
+      type: object
+      description: >-
+        A photo as it appears on someone else's profile card (organizer
+        attendee/invitation lists, vibe cards). Unlike the shared Photo schema
+        this has NO id — those serializers never select it, since a viewer
+        looking at another person's card has no reason to address an
+        individual photo row.
+      properties:
+        url:
+          type: string
+          description: Presigned GET URL, ~1 hour TTL. The bucket is private — expires, don't cache long-term.
+        position:
+          type: integer
+          minimum: 0
+          maximum: 3
+          description: Position 0 is the Main photo
+
+    CardLifestyleTag:
+      type: object
+      description: >-
+        A lifestyle tag as it appears on someone else's profile card. Unlike
+        the shared LifestyleTag schema this has NO id.
+      properties:
+        label:
+          type: string
+          example: Clubbing
+        category:
+          type: string
+          example: Going out
 
     OrganizerAttendee:
       description: A ticket-holder for the organizer's event. No phone/email — see OrganizerProfileCard.
@@ -3432,6 +3463,15 @@ components:
         category:
           type: string
           example: Going out
+
+    Gender:
+      type: string
+      description: >-
+        Immutable once set. Mirrors the profiles.gender CHECK constraint —
+        keep this enum in sync with the allowed lists in onboarding.js and
+        profile.js if the constraint ever changes.
+      enum: [man, woman, non_binary, prefer_not_to_say]
+      example: woman
 
     Photo:
       type: object
@@ -3722,11 +3762,11 @@ components:
             photos:
               type: array
               items:
-                $ref: '#/components/schemas/Photo'
+                $ref: '#/components/schemas/CardPhoto'
             lifestyleTags:
               type: array
               items:
-                $ref: '#/components/schemas/LifestyleTag'
+                $ref: '#/components/schemas/CardLifestyleTag'
         event:
           type: object
           properties:

@@ -150,9 +150,14 @@ describe('Pagination — shared shape', () => {
         expect(res.body.limit).toBe(100);
     });
 
+    // Scoped to this file's own event. Unscoped, it paged over every order in
+    // the database, so an order inserted by another test file between the two
+    // requests shifted the window and made offset=1 return what offset=0 had
+    // just returned — a race, not a pagination bug. This event's four orders
+    // are written only by this file.
     it('offset actually pages through results', async () => {
-        const page1 = await request(app).get('/admin/orders?limit=1&offset=0').set('Authorization', `Bearer ${adminToken}`);
-        const page2 = await request(app).get('/admin/orders?limit=1&offset=1').set('Authorization', `Bearer ${adminToken}`);
+        const page1 = await request(app).get(`/admin/orders?eventId=${eventId}&limit=1&offset=0`).set('Authorization', `Bearer ${adminToken}`);
+        const page2 = await request(app).get(`/admin/orders?eventId=${eventId}&limit=1&offset=1`).set('Authorization', `Bearer ${adminToken}`);
         expect(page1.body.data[0].id).not.toBe(page2.body.data[0].id);
     });
 

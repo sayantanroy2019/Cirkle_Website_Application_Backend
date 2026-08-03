@@ -6,8 +6,10 @@ import {
     objectExists,
     getPhotoViewUrl,
     getPhotoViewUrls,
-    createEventImageUploadUrl
+    createEventImageUploadUrl,
+    createArtistPhotoUploadUrl
 } from '../utils/s3.js';
+import { normalizeInstagram } from '../utils/instagram.js';
 
 const adminEventsRouter = express.Router();
 
@@ -575,6 +577,283 @@ adminEventsRouter.put('/:id/gallery', async (req, res) => {
     } catch (err) {
         await client.query('ROLLBACK');
         console.error('PUT /admin/events/:id/gallery error:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        client.release();
+    }
+});
+
+// ─── Lineup / artists ────────────────────────────────────────────────────
+//
+// Artists are event-scoped rows, not a global catalogue — the same performer
+// at two events is two rows. See the migration for why.
+//
+// Editing model (Option A, mirroring the gallery's create-then-upload flow):
+// PUT owns the text fields and the set membership; photos are attached
+// separately per artist, keyed to the artist id. PUT is therefore an
+// upsert-by-id rather than a delete-and-reinsert — reinserting would throw
+// away photo_s3_key for artists that survived the edit.
+
+const MAX_ARTISTS = 10;
+
+async function fetchArtists(eventId, queryable = pool) {
+    const result = await queryable.query(
+        `SELECT id, name, instagram, photo_s3_key, position
+         FROM event_artists
+         WHERE event_id = $1
+         ORDER BY position ASC`,
+        [eventId]
+    );
+
+    const keys = result.rows.map(a => a.photo_s3_key).filter(Boolean);
+    const viewUrls = await getPhotoViewUrls(keys);
+
+    return result.rows.map(a => ({
+        id:        a.id,
+        name:      a.name,
+        instagram: a.instagram,
+        photoUrl:  a.photo_s3_key ? viewUrls[a.photo_s3_key] : null,
+        position:  a.position
+    }));
+}
+
+// GET /admin/events/:id/artists
+adminEventsRouter.get('/:id/artists', async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const eventCheck = await pool.query('SELECT id FROM events WHERE id = $1', [id]);
+        if (eventCheck.rows.length === 0) {
+            return res.status(404).json({ error: 'Event not found' });
+        }
+
+        res.json({ artists: await fetchArtists(id) });
+
+    } catch (err) {
+        console.error('GET /admin/events/:id/artists error:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// PUT /admin/events/:id/artists
+// Sets the whole lineup. Each entry may carry an `id` to update an existing
+// artist (keeping its photo); entries without one are created. Any artist not
+// present in the payload is deleted, and its photo key goes with it.
+adminEventsRouter.put('/:id/artists', async (req, res) => {
+    const { id } = req.params;
+    const { artists } = req.body;
+
+    if (!Array.isArray(artists)) {
+        return res.status(400).json({ error: 'artists must be an array' });
+    }
+    if (artists.length > MAX_ARTISTS) {
+        return res.status(400).json({ error: `Provide at most ${MAX_ARTISTS} artists` });
+    }
+
+    const normalized = [];
+    for (const artist of artists) {
+        if (!artist.name || !String(artist.name).trim()) {
+            return res.status(400).json({ error: 'Each artist must have a name' });
+        }
+        if (!Number.isInteger(artist.position) || artist.position < 0 || artist.position > MAX_ARTISTS - 1) {
+            return res.status(400).json({ error: `Each artist must have a position between 0 and ${MAX_ARTISTS - 1}` });
+        }
+        let instagram;
+        try {
+            instagram = normalizeInstagram(artist.instagram);
+        } catch {
+            return res.status(400).json({ error: `Invalid Instagram handle for "${String(artist.name).trim()}"` });
+        }
+        normalized.push({ id: artist.id, name: String(artist.name).trim(), instagram, position: artist.position });
+    }
+
+    const positions = normalized.map(a => a.position);
+    if (new Set(positions).size !== positions.length) {
+        return res.status(400).json({ error: 'Each artist must have a unique position' });
+    }
+
+    const client = await pool.connect();
+
+    try {
+        const eventCheck = await client.query('SELECT id FROM events WHERE id = $1', [id]);
+        if (eventCheck.rows.length === 0) {
+            return res.status(404).json({ error: 'Event not found' });
+        }
+
+        const existingResult = await client.query(
+            'SELECT id, name, instagram, position FROM event_artists WHERE event_id = $1',
+            [id]
+        );
+        const existingIds = new Set(existingResult.rows.map(a => a.id));
+
+        // An id the caller invented, or one belonging to another event, would
+        // silently become an insert and orphan the real row — reject instead.
+        for (const artist of normalized) {
+            if (artist.id !== undefined && !existingIds.has(artist.id)) {
+                return res.status(400).json({ error: 'One or more artist ids do not belong to this event' });
+            }
+        }
+
+        await client.query('BEGIN');
+
+        const keptIds = normalized.filter(a => a.id !== undefined).map(a => a.id);
+        const removed = await client.query(
+            `DELETE FROM event_artists
+             WHERE event_id = $1 AND NOT (id = ANY($2::uuid[]))
+             RETURNING id, name`,
+            [id, keptIds]
+        );
+
+        // The UNIQUE (event_id, position) constraint is DEFERRABLE INITIALLY
+        // DEFERRED, so a reorder can pass through a transiently duplicated
+        // position and still be validated at COMMIT.
+        for (const artist of normalized) {
+            if (artist.id !== undefined) {
+                await client.query(
+                    `UPDATE event_artists SET name = $1, instagram = $2, position = $3
+                     WHERE id = $4 AND event_id = $5`,
+                    [artist.name, artist.instagram, artist.position, artist.id, id]
+                );
+            } else {
+                await client.query(
+                    `INSERT INTO event_artists (event_id, name, instagram, position)
+                     VALUES ($1, $2, $3, $4)`,
+                    [id, artist.name, artist.instagram, artist.position]
+                );
+            }
+        }
+
+        await recordAudit(client, {
+            adminId: req.admin.adminId,
+            action: 'update',
+            entityType: 'event',
+            entityId: id,
+            changes: {
+                artists: {
+                    from: existingResult.rows
+                        .slice()
+                        .sort((a, b) => a.position - b.position)
+                        .map(a => ({ name: a.name, instagram: a.instagram, position: a.position })),
+                    to: normalized
+                        .slice()
+                        .sort((a, b) => a.position - b.position)
+                        .map(a => ({ name: a.name, instagram: a.instagram, position: a.position })),
+                    removed: removed.rows.map(a => a.name)
+                }
+            }
+        });
+
+        await client.query('COMMIT');
+
+        res.json({ artists: await fetchArtists(id) });
+
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('PUT /admin/events/:id/artists error:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        client.release();
+    }
+});
+
+// POST /admin/events/:id/artists/:artistId/image-url
+// Presigned upload handshake — same two-step as event images. The artist must
+// already exist, so its id can namespace the key.
+adminEventsRouter.post('/:id/artists/:artistId/image-url', async (req, res) => {
+    const { id, artistId } = req.params;
+    const { contentType } = req.body;
+
+    if (!contentType) {
+        return res.status(400).json({ error: 'contentType is required' });
+    }
+
+    try {
+        const artistCheck = await pool.query(
+            'SELECT id FROM event_artists WHERE id = $1 AND event_id = $2',
+            [artistId, id]
+        );
+        if (artistCheck.rows.length === 0) {
+            return res.status(404).json({ error: 'Artist not found' });
+        }
+
+        const { uploadUrl, key } = await createArtistPhotoUploadUrl(id, artistId, contentType);
+        res.json({ uploadUrl, key });
+
+    } catch (err) {
+        if (err.message === 'UNSUPPORTED_TYPE') {
+            return res.status(400).json({ error: 'Only JPEG, PNG, and WebP images are allowed' });
+        }
+        console.error('POST /admin/events/:id/artists/:artistId/image-url error:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// PATCH /admin/events/:id/artists/:artistId/photo
+// Attaches an uploaded photo. Verifies the object landed in S3 first, same
+// all-or-nothing rule as the banner. Pass s3Key: null to clear the photo.
+adminEventsRouter.patch('/:id/artists/:artistId/photo', async (req, res) => {
+    const { id, artistId } = req.params;
+    const { s3Key } = req.body;
+
+    if (s3Key === undefined) {
+        return res.status(400).json({ error: 's3Key is required' });
+    }
+
+    const client = await pool.connect();
+
+    try {
+        const artistCheck = await client.query(
+            'SELECT id, name, photo_s3_key FROM event_artists WHERE id = $1 AND event_id = $2',
+            [artistId, id]
+        );
+        if (artistCheck.rows.length === 0) {
+            return res.status(404).json({ error: 'Artist not found' });
+        }
+        const before = artistCheck.rows[0];
+
+        if (s3Key !== null) {
+            // The key is server-generated and namespaced to this artist —
+            // reject one pointing anywhere else, so a caller can't attach
+            // another artist's (or another event's) photo.
+            if (!s3Key.startsWith(`events/${id}/artists/${artistId}/`)) {
+                return res.status(400).json({ error: 's3Key does not belong to this artist' });
+            }
+            const exists = await objectExists(s3Key);
+            if (!exists) {
+                return res.status(400).json({ error: 'The image was not uploaded successfully. Please try again.' });
+            }
+        }
+
+        await client.query('BEGIN');
+
+        await client.query(
+            'UPDATE event_artists SET photo_s3_key = $1 WHERE id = $2 AND event_id = $3',
+            [s3Key, artistId, id]
+        );
+
+        await recordAudit(client, {
+            adminId: req.admin.adminId,
+            action: 'update',
+            entityType: 'event',
+            entityId: id,
+            changes: {
+                artistPhoto: {
+                    artistId,
+                    artistName: before.name,
+                    from: before.photo_s3_key,
+                    to: s3Key
+                }
+            }
+        });
+
+        await client.query('COMMIT');
+
+        const photoUrl = s3Key ? await getPhotoViewUrl(s3Key) : null;
+        res.json({ artistId, photoUrl });
+
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('PATCH /admin/events/:id/artists/:artistId/photo error:', err.message);
         res.status(500).json({ error: 'Internal server error' });
     } finally {
         client.release();

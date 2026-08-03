@@ -71,6 +71,35 @@ export async function createEventImageUploadUrl(eventId, kind, contentType) {
 }
 
 /**
+ * Generates a presigned PUT URL for an artist's photo.
+ * Keyed under the artist, not just the event, so a lineup edit that drops one
+ * artist can never collide with another's photo.
+ *
+ * @param {string} eventId
+ * @param {string} artistId
+ * @param {string} contentType
+ * @returns {{ uploadUrl, key }} the URL to PUT to, and the key to store later
+ */
+export async function createArtistPhotoUploadUrl(eventId, artistId, contentType) {
+    const ext = ALLOWED_TYPES[contentType];
+    if (!ext) {
+        throw new Error('UNSUPPORTED_TYPE');
+    }
+
+    // events/{eventId}/artists/{artistId}/{uuid}.{ext}
+    const key = `events/${eventId}/artists/${artistId}/${randomUUID()}.${ext}`;
+
+    const command = new PutObjectCommand({
+        Bucket:      S3_BUCKET,
+        Key:         key,
+        ContentType: contentType
+    });
+
+    const uploadUrl = await getSignedUrl(s3, command, { expiresIn: UPLOAD_URL_TTL });
+    return { uploadUrl, key };
+}
+
+/**
  * Verifies an object actually exists in the bucket.
  * Called before saving a key to the DB — the client claims "I uploaded it,"
  * and this confirms the file genuinely landed rather than trusting the client.

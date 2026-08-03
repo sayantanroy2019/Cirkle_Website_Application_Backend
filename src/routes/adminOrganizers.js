@@ -3,6 +3,7 @@ import bcrypt from 'bcrypt';
 import { pool } from '../config/db.js';
 import authenticateAdmin from '../middlewares/authenticateAdmin.js';
 import { recordAudit, diffChanges } from '../utils/audit.js';
+import { normalizeInstagram } from '../utils/instagram.js';
 
 const adminOrganizersRouter = express.Router();
 
@@ -17,6 +18,7 @@ function toResponse(row) {
         id:          row.id,
         email:       row.email,
         displayName: row.display_name,
+        instagram:   row.instagram ?? null,
         isActive:    row.is_active,
         createdAt:   row.created_at,
         ...(row.event_count !== undefined ? { eventCount: parseInt(row.event_count, 10) } : {})
@@ -27,7 +29,7 @@ function toResponse(row) {
 // Onboards a new organizer — admin creates the account, then hands the
 // organizer their credentials out of band.
 adminOrganizersRouter.post('/', async (req, res) => {
-    const { email, password, displayName } = req.body;
+    const { email, password, displayName, instagram } = req.body;
 
     if (!email || !emailRegex.test(email)) {
         return res.status(400).json({ error: 'Valid email is required' });
@@ -37,6 +39,13 @@ adminOrganizersRouter.post('/', async (req, res) => {
     }
     if (!displayName || !displayName.trim()) {
         return res.status(400).json({ error: 'displayName is required' });
+    }
+
+    let normalizedInstagram;
+    try {
+        normalizedInstagram = normalizeInstagram(instagram);
+    } catch {
+        return res.status(400).json({ error: 'Invalid Instagram handle' });
     }
 
     const normalizedEmail = email.trim().toLowerCase();
@@ -54,10 +63,10 @@ adminOrganizersRouter.post('/', async (req, res) => {
         await client.query('BEGIN');
 
         const inserted = await client.query(
-            `INSERT INTO organizers (email, password_hash, display_name)
-             VALUES ($1, $2, $3)
-             RETURNING id, email, display_name, is_active, created_at`,
-            [normalizedEmail, passwordHash, displayName.trim()]
+            `INSERT INTO organizers (email, password_hash, display_name, instagram)
+             VALUES ($1, $2, $3, $4)
+             RETURNING id, email, display_name, instagram, is_active, created_at`,
+            [normalizedEmail, passwordHash, displayName.trim(), normalizedInstagram]
         );
         const organizer = inserted.rows[0];
 
@@ -69,6 +78,7 @@ adminOrganizersRouter.post('/', async (req, res) => {
             changes: {
                 email:       organizer.email,
                 displayName: organizer.display_name,
+                instagram:   organizer.instagram,
                 isActive:    organizer.is_active,
                 password:    'set' // never the value
             }
@@ -92,7 +102,7 @@ adminOrganizersRouter.post('/', async (req, res) => {
 adminOrganizersRouter.get('/', async (req, res) => {
     try {
         const result = await pool.query(
-            `SELECT o.id, o.email, o.display_name, o.is_active, o.created_at,
+            `SELECT o.id, o.email, o.display_name, o.instagram, o.is_active, o.created_at,
                     COUNT(e.id) AS event_count
              FROM organizers o
              LEFT JOIN events e ON e.organizer_id = o.id
@@ -113,7 +123,7 @@ adminOrganizersRouter.get('/:id', async (req, res) => {
 
     try {
         const result = await pool.query(
-            `SELECT o.id, o.email, o.display_name, o.is_active, o.created_at,
+            `SELECT o.id, o.email, o.display_name, o.instagram, o.is_active, o.created_at,
                     COUNT(e.id) AS event_count
              FROM organizers o
              LEFT JOIN events e ON e.organizer_id = o.id
@@ -139,7 +149,7 @@ adminOrganizersRouter.get('/:id', async (req, res) => {
 // login — this is how an admin resets a forgotten password.
 adminOrganizersRouter.patch('/:id', async (req, res) => {
     const { id } = req.params;
-    const { displayName, email, isActive, password } = req.body;
+    const { displayName, email, isActive, password, instagram } = req.body;
 
     if (email !== undefined && !emailRegex.test(email)) {
         return res.status(400).json({ error: 'Invalid email format' });
@@ -154,11 +164,22 @@ adminOrganizersRouter.patch('/:id', async (req, res) => {
         return res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters` });
     }
 
+    // instagram: '' or null clears the handle; normalizeInstagram maps both
+    // to null, so "unset it" and "never set it" store the same value.
+    let normalizedInstagram;
+    if (instagram !== undefined) {
+        try {
+            normalizedInstagram = normalizeInstagram(instagram);
+        } catch {
+            return res.status(400).json({ error: 'Invalid Instagram handle' });
+        }
+    }
+
     const client = await pool.connect();
 
     try {
         const beforeResult = await client.query(
-            'SELECT id, email, display_name, is_active FROM organizers WHERE id = $1',
+            'SELECT id, email, display_name, instagram, is_active FROM organizers WHERE id = $1',
             [id]
         );
         if (beforeResult.rows.length === 0) {
@@ -193,6 +214,10 @@ adminOrganizersRouter.patch('/:id', async (req, res) => {
             updates.push(`is_active = $${paramCount++}`);
             values.push(isActive);
         }
+        if (instagram !== undefined) {
+            updates.push(`instagram = $${paramCount++}`);
+            values.push(normalizedInstagram);
+        }
         let passwordChanged = false;
         if (password !== undefined) {
             const passwordHash = await bcrypt.hash(password, 10);
@@ -213,12 +238,12 @@ adminOrganizersRouter.patch('/:id', async (req, res) => {
             `UPDATE organizers
              SET ${updates.join(', ')}, updated_at = now()
              WHERE id = $${paramCount}
-             RETURNING id, email, display_name, is_active, created_at`,
+             RETURNING id, email, display_name, instagram, is_active, created_at`,
             values
         );
         const after = afterResult.rows[0];
 
-        const changes = diffChanges(before, after, ['email', 'display_name', 'is_active']);
+        const changes = diffChanges(before, after, ['email', 'display_name', 'instagram', 'is_active']);
         if (passwordChanged) {
             changes.password = { from: 'set', to: 'reset' }; // never the value
         }

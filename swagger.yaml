@@ -1477,6 +1477,253 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /admin/events/{id}/artists:
+    get:
+      tags: [Admin — Events]
+      summary: List the event's lineup
+      description: Artists ordered by position, headliner (position 0) first. photoUrl is presigned, or null when the artist has no photo.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The lineup
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artists:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/EventArtist'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [Admin — Events]
+      summary: Set the event's lineup
+      description: |
+        Sets the whole lineup in one call. Max 10 artists, positions 0-9, no duplicate positions.
+
+        This is an **upsert by id**, not a delete-and-reinsert. Include an artist's `id` to update it in place and keep its photo; omit `id` to create a new artist. Any existing artist whose id is absent from the payload is deleted, and its photo reference goes with it.
+
+        That distinction matters: photos are attached per-artist (see the two endpoints below) and keyed to the artist id, so reinserting rows on every edit would orphan every photo. Send back the ids you got from GET.
+
+        Instagram handles are normalized on write — a full profile URL, a leading @, or a bare handle all store as the bare handle. An unparseable value is rejected rather than stored.
+
+        Writes one audit_log row recording the before/after lineup and the names of any removed artists.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [artists]
+              properties:
+                artists:
+                  type: array
+                  maxItems: 10
+                  items:
+                    type: object
+                    required: [name, position]
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        description: Omit to create. Include to update an existing artist in place, preserving its photo. Must belong to this event.
+                      name:
+                        type: string
+                        example: Arijit Singh
+                      instagram:
+                        type: string
+                        nullable: true
+                        description: Handle, @handle, or profile URL — normalized to the bare handle. Null or empty clears it.
+                        example: arijitsingh
+                      position:
+                        type: integer
+                        minimum: 0
+                        maximum: 9
+                        description: 0 is the headliner
+      responses:
+        '200':
+          description: The saved lineup, with ids for photo upload
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artists:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/EventArtist'
+        '400':
+          description: More than 10 artists, missing name, invalid/duplicate position, an unparseable Instagram handle, or an artist id that isn't this event's
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/events/{id}/artists/{artistId}/image-url:
+    post:
+      tags: [Admin — Events]
+      summary: Get a presigned upload URL for an artist photo
+      description: |
+        Same handshake as event images: call this, PUT the file bytes to the returned uploadUrl, then attach the returned key via PATCH .../photo below.
+
+        The artist must already exist — create the lineup with PUT first, then use the ids it returns. The key is server-generated and namespaced to the artist (`events/{eventId}/artists/{artistId}/{uuid}.{ext}`), so a client can never place a file outside its own artist.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: path
+          name: artistId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contentType]
+              properties:
+                contentType:
+                  type: string
+                  enum: [image/jpeg, image/png, image/webp]
+      responses:
+        '200':
+          description: Presigned upload URL, valid 5 minutes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uploadUrl:
+                    type: string
+                  key:
+                    type: string
+                    description: Send this back as s3Key to PATCH .../photo
+                    example: events/6f1c.../artists/9ab2.../c3d4.webp
+        '400':
+          description: Missing contentType, or an unsupported image type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Artist not found on this event
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/events/{id}/artists/{artistId}/photo:
+    patch:
+      tags: [Admin — Events]
+      summary: Attach (or clear) an artist's photo
+      description: |
+        Verifies the object exists in S3 before saving — same all-or-nothing rule as the event banner. Also rejects an s3Key that isn't namespaced to this artist, so one artist's photo can't be pointed at another's.
+
+        Send `s3Key: null` to clear the photo; the artist then returns photoUrl null and the frontend shows its default avatar.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: path
+          name: artistId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [s3Key]
+              properties:
+                s3Key:
+                  type: string
+                  nullable: true
+                  description: The key returned by the image-url endpoint, or null to clear
+      responses:
+        '200':
+          description: Photo attached or cleared
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artistId:
+                    type: string
+                    format: uuid
+                  photoUrl:
+                    type: string
+                    nullable: true
+                    description: Presigned GET URL, or null if the photo was cleared
+        '400':
+          description: Missing s3Key, a key not belonging to this artist, or the image was not found in S3
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Artist not found on this event
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   # ─── ADMIN OVERSIGHT (read-only) ───────────────────────────────────────
 
   /admin/orders:
@@ -2798,6 +3045,11 @@ components:
           type: string
           example: Kitty Su
           description: Business name shown in the organizer dashboard
+        instagram:
+          type: string
+          nullable: true
+          description: Bare handle, no @ and no URL — normalized on write. Shown as an icon link on the consumer event-detail page. Optional.
+          example: kittysu
         isActive:
           type: boolean
           description: Kill switch — disables login without deleting the account
@@ -2807,6 +3059,36 @@ components:
         eventCount:
           type: integer
           description: Present on GET /admin/organizers and GET /admin/organizers/{id}, absent on create
+
+    EventArtist:
+      type: object
+      description: >-
+        One performer on an event's lineup. Event-scoped, not a global artist
+        catalogue — the same performer at two events is two rows with two ids.
+        Identical shape on the admin and consumer endpoints; neither exposes
+        the raw photo_s3_key.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Send this back in PUT /admin/events/{id}/artists to update in place and keep the photo, and use it to key photo uploads.
+        name:
+          type: string
+          example: Arijit Singh
+        instagram:
+          type: string
+          nullable: true
+          description: Bare handle — no @, no URL. Build the link as https://instagram.com/{instagram}.
+          example: arijitsingh
+        photoUrl:
+          type: string
+          nullable: true
+          description: Presigned GET URL, ~1 hour TTL. Null when the artist has no photo — the frontend supplies its own default avatar.
+        position:
+          type: integer
+          minimum: 0
+          maximum: 9
+          description: Lineup order; 0 is the headliner
 
     AdminEvent:
       type: object
@@ -3585,6 +3867,20 @@ components:
                 type: integer
                 minimum: 0
                 maximum: 4
+        artists:
+          type: array
+          description: The lineup, ordered by position (0 = headliner). Empty array when the event has no artists. Only present on GET /events/{id}, not the list endpoint.
+          items:
+            $ref: '#/components/schemas/EventArtist'
+        organizerInstagram:
+          type: string
+          nullable: true
+          description: >-
+            The event organizer's Instagram handle, for an icon link. Null when
+            the event has no organizer or the organizer set no handle. This is
+            deliberately the ONLY organizer field on the consumer response — no
+            name, no email. Only present on GET /events/{id}.
+          example: kittysu
         userHasTicket:
           type: boolean
           description: Whether the requesting user already holds a ticket to this event (only present on GET /events/{id})

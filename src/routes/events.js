@@ -122,12 +122,17 @@ eventsRouter.get('/:id', authenticate, async (req, res) => {
     try {
         const result = await pool.query(
             `SELECT
-                id, name, category_id, city_id,
-                starts_at, ends_at, price, target_group_size,
-                venue_name, venue_address, description, banner_s3_key,
-                capacity,event_type
-             FROM events
-             WHERE id = $1`,
+                e.id, e.name, e.category_id, e.city_id,
+                e.starts_at, e.ends_at, e.price, e.target_group_size,
+                e.venue_name, e.venue_address, e.description, e.banner_s3_key,
+                e.capacity, e.event_type,
+                -- Only the handle, nothing else about the organizer. This is
+                -- for an Instagram icon link on the detail page; the consumer
+                -- response deliberately exposes no organizer name or email.
+                o.instagram AS organizer_instagram
+             FROM events e
+             LEFT JOIN organizers o ON o.id = e.organizer_id
+             WHERE e.id = $1`,
             [id]
         );
 
@@ -176,8 +181,21 @@ eventsRouter.get('/:id', authenticate, async (req, res) => {
             [id]
         );
 
-        // Bucket is private — sign banner + gallery keys in one batch
-        const allKeys = [e.banner_s3_key, ...galleryResult.rows.map(p => p.s3_key)].filter(Boolean);
+        // Lineup — ordered, headliner (position 0) first
+        const artistsResult = await pool.query(
+            `SELECT id, name, instagram, photo_s3_key, position
+             FROM event_artists
+             WHERE event_id = $1
+             ORDER BY position ASC`,
+            [id]
+        );
+
+        // Bucket is private — sign banner + gallery + artist keys in one batch
+        const allKeys = [
+            e.banner_s3_key,
+            ...galleryResult.rows.map(p => p.s3_key),
+            ...artistsResult.rows.map(a => a.photo_s3_key)
+        ].filter(Boolean);
         const viewUrls = await getPhotoViewUrls(allKeys);
 
         res.json({
@@ -198,6 +216,14 @@ eventsRouter.get('/:id', authenticate, async (req, res) => {
                     url:      viewUrls[p.s3_key],
                     position: p.position
                 })),
+                artists:         artistsResult.rows.map(a => ({
+                    id:        a.id,
+                    name:      a.name,
+                    instagram: a.instagram,
+                    photoUrl:  a.photo_s3_key ? viewUrls[a.photo_s3_key] : null,
+                    position:  a.position
+                })),
+                organizerInstagram: e.organizer_instagram ?? null,
                 userHasTicket,
                 soldOut,
                 eventType:        e.event_type,

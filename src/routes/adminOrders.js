@@ -74,7 +74,7 @@ adminOrdersRouter.get('/', async (req, res) => {
              JOIN users u ON u.id = o.user_id
              LEFT JOIN profiles p ON p.user_id = u.id
              ${where}
-             ORDER BY o.created_at DESC
+             ORDER BY o.created_at DESC, o.id DESC
              LIMIT $${p++} OFFSET $${p++}`,
             [...values, limit, offset]
         );

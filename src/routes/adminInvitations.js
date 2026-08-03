@@ -74,7 +74,7 @@ adminInvitationsRouter.get('/', async (req, res) => {
              JOIN users u ON u.id = ei.user_id
              LEFT JOIN profiles p ON p.user_id = u.id
              ${where}
-             ORDER BY ei.created_at DESC
+             ORDER BY ei.created_at DESC, ei.id DESC
              LIMIT $${p++} OFFSET $${p++}`,
             [...values, limit, offset]
         );

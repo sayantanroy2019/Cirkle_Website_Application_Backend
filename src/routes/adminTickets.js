@@ -63,7 +63,7 @@ adminTicketsRouter.get('/', async (req, res) => {
              JOIN users u ON u.id = t.user_id
              LEFT JOIN profiles p ON p.user_id = u.id
              ${where}
-             ORDER BY t.created_at DESC
+             ORDER BY t.created_at DESC, t.id DESC
              LIMIT $${p++} OFFSET $${p++}`,
             [...values, limit, offset]
         );

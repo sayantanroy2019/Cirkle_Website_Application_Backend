@@ -27,7 +27,7 @@ organizerEventsRouter.get('/', async (req, res) => {
             `SELECT e.*, (SELECT COUNT(*) FROM tickets t WHERE t.event_id = e.id) AS tickets_sold
              FROM events e
              WHERE e.organizer_id = $1
-             ORDER BY e.starts_at DESC
+             ORDER BY e.starts_at DESC, e.id DESC
              LIMIT $2 OFFSET $3`,
             [organizerId, limit, offset]
         );
@@ -152,7 +152,7 @@ organizerEventsRouter.get('/:id/attendees', async (req, res) => {
             `SELECT id AS ticket_id, user_id, checked_in_at
              FROM tickets
              WHERE event_id = $1
-             ORDER BY created_at DESC
+             ORDER BY created_at DESC, id DESC
              LIMIT $2 OFFSET $3`,
             [id, limit, offset]
         );
@@ -207,7 +207,7 @@ organizerEventsRouter.get('/:id/invitations', async (req, res) => {
             `SELECT id AS invitation_id, user_id, status, created_at AS requested_at
              FROM event_invitations
              WHERE event_id = $1 AND status = $2
-             ORDER BY created_at DESC
+             ORDER BY created_at DESC, id DESC
              LIMIT $3 OFFSET $4`,
             [id, status, limit, offset]
         );

@@ -76,7 +76,7 @@ adminRevenueRouter.get('/by-event', async (req, res) => {
              FROM events e
              LEFT JOIN orders o ON o.event_id = e.id
              GROUP BY e.id
-             ORDER BY e.starts_at DESC
+             ORDER BY e.starts_at DESC, e.id DESC
              LIMIT $1 OFFSET $2`,
             [limit, offset]
         );

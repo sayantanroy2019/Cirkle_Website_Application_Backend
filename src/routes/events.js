@@ -2,6 +2,9 @@ import express from 'express';
 import {pool}    from '../config/db.js';
 import authenticate from '../middlewares/auth.js';
 import { getPhotoViewUrls } from '../utils/s3.js';
+import { checkRequiredHandles, socialHandlesRequiredResponse } from '../utils/socialGate.js';
+import { fetchPublicAttendeeProfiles } from '../utils/publicAttendee.js';
+import { parsePagination, paginatedResponse } from '../utils/pagination.js';
 
 const eventsRouter = express.Router();
 
@@ -126,6 +129,7 @@ eventsRouter.get('/:id', authenticate, async (req, res) => {
                 e.starts_at, e.ends_at, e.price, e.target_group_size,
                 e.venue_name, e.venue_address, e.description, e.banner_s3_key,
                 e.capacity, e.event_type,
+                e.require_facebook, e.require_instagram, e.require_linkedin,
                 -- Only the handle, nothing else about the organizer. This is
                 -- for an Instagram icon link on the detail page; the consumer
                 -- response deliberately exposes no organizer name or email.
@@ -224,6 +228,12 @@ eventsRouter.get('/:id', authenticate, async (req, res) => {
                     position:  a.position
                 })),
                 organizerInstagram: e.organizer_instagram ?? null,
+                // Exposed so the app can warn before the gate fires. The gate
+                // itself is enforced server-side at purchase/request — these
+                // flags are UX, not the boundary.
+                requireFacebook:  e.require_facebook,
+                requireInstagram: e.require_instagram,
+                requireLinkedin:  e.require_linkedin,
                 userHasTicket,
                 soldOut,
                 eventType:        e.event_type,
@@ -233,6 +243,69 @@ eventsRouter.get('/:id', authenticate, async (req, res) => {
 
     } catch (err) {
         console.error('GET /events/:id error:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// GET /events/:id/attendees
+// The "Who's Going" roster. Readable by ANY logged-in user viewing the event —
+// holding a ticket is not required. That's deliberate: the list is social proof
+// that drives bookings, so gating it behind a purchase would defeat its point.
+//
+// Not the organizer endpoint's data. This uses fetchPublicAttendeeProfiles(),
+// whose SELECT excludes last_name, bio and the social handles that the
+// organizer card deliberately includes. See src/utils/publicAttendee.js.
+eventsRouter.get('/:id/attendees', authenticate, async (req, res) => {
+    const { id: eventId } = req.params;
+    const { limit, offset } = parsePagination(req.query);
+
+    try {
+        const eventCheck = await pool.query('SELECT id FROM events WHERE id = $1', [eventId]);
+        if (eventCheck.rows.length === 0) {
+            return res.status(404).json({ error: 'Event not found' });
+        }
+
+        // One row per person, not per ticket. Checkout already enforces one
+        // ticket per user per event, so this is belt-and-braces — but the
+        // organizer endpoint pages over tickets and this one must not, or a
+        // double-ticketed user would appear twice and inflate the count.
+        const countResult = await pool.query(
+            'SELECT COUNT(DISTINCT user_id) FROM tickets WHERE event_id = $1',
+            [eventId]
+        );
+
+        // Newest attendee first. The id tiebreaker is required, not cosmetic:
+        // created_at ties are common (bulk inserts, same-second checkouts) and
+        // without a unique sort key LIMIT/OFFSET silently drops and repeats
+        // rows across pages.
+        const attendeesResult = await pool.query(
+            `SELECT d.user_id, d.created_at, d.id
+             FROM (
+                SELECT DISTINCT ON (t.user_id) t.user_id, t.created_at, t.id
+                FROM tickets t
+                WHERE t.event_id = $1
+                ORDER BY t.user_id, t.created_at DESC, t.id DESC
+             ) d
+             ORDER BY d.created_at DESC, d.id DESC
+             LIMIT $2 OFFSET $3`,
+            [eventId, limit, offset]
+        );
+
+        const userIds = attendeesResult.rows.map(r => r.user_id);
+        const profiles = await fetchPublicAttendeeProfiles(userIds);
+
+        // The viewer is included when they hold a ticket, flagged rather than
+        // filtered — "24 attending" has to mean 24 people, and dropping self
+        // would make the count disagree with the roster.
+        const data = attendeesResult.rows
+            .map(r => profiles[r.user_id])
+            .filter(Boolean)   // a ticket-holder who never completed onboarding
+            .map(person => ({ ...person, isYou: person.id === req.user.userId }));
+
+        res.json(paginatedResponse(data, countResult.rows[0].count, limit, offset));
+
+    } catch (err) {
+        console.error('GET /events/:id/attendees error:', err.message);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
@@ -250,7 +323,9 @@ eventsRouter.post('/:id/invitations', authenticate, async (req, res) => {
     try {
         // Event must exist and be invite-only
         const eventResult = await pool.query(
-            'SELECT id, event_type, organizer_id FROM events WHERE id = $1',
+            `SELECT id, event_type, organizer_id,
+                    require_facebook, require_instagram, require_linkedin
+             FROM events WHERE id = $1`,
             [eventId]
         );
 
@@ -260,6 +335,18 @@ eventsRouter.post('/:id/invitations', authenticate, async (req, res) => {
 
         if (eventResult.rows[0].event_type !== 'invite_only') {
             return res.status(400).json({ error: 'This event does not require an invitation' });
+        }
+
+        // Social handle gate, before the request is created. Gating here — not
+        // at purchase — is what guarantees the organizer sees the required
+        // handles on the request card when they decide.
+        const profileForGate = await pool.query(
+            'SELECT facebook, instagram, linkedin FROM profiles WHERE user_id = $1',
+            [userId]
+        );
+        const gate = checkRequiredHandles(eventResult.rows[0], profileForGate.rows[0] ?? null);
+        if (!gate.ok) {
+            return res.status(403).json(socialHandlesRequiredResponse(gate.missing));
         }
 
         // Attempt to create the request. If a row already exists, the UNIQUE

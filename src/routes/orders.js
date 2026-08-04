@@ -3,6 +3,7 @@ import { pool } from '../config/db.js';
 import razorpay from '../config/razorpay.js';
 import authenticate from '../middlewares/auth.js';
 import { validateCoupon } from '../utils/coupons.js';
+import { checkRequiredHandles, socialHandlesRequiredResponse } from '../utils/socialGate.js';
 import {
     getGstPercentage,
     getHoldDurationMinutes,
@@ -81,7 +82,9 @@ ordersRouter.post('/orders', authenticate, async (req, res) => {
         // The lock is held for milliseconds — just this check and the insert.
         // The seat is protected during payment by the hold row, not the lock.
         const eventResult = await client.query(
-            'SELECT id, price, capacity, starts_at, event_type FROM events WHERE id = $1 FOR UPDATE',
+            `SELECT id, price, capacity, starts_at, event_type,
+                    require_facebook, require_instagram, require_linkedin
+             FROM events WHERE id = $1 FOR UPDATE`,
             [eventId]
         );
 
@@ -95,6 +98,22 @@ ordersRouter.post('/orders', authenticate, async (req, res) => {
         if (new Date(event.starts_at) < new Date()) {
             await client.query('ROLLBACK');
             return res.status(409).json({ error: 'This event has already started' });
+        }
+
+        // Social handle gate — the first gate, ahead of invite-acceptance and
+        // capacity. A user missing a required handle can't buy at all, so
+        // there's no point burning an invitation check or a seat race on them.
+        //
+        // Evaluated here and only here: a requirement added after someone
+        // bought has no effect on their existing ticket.
+        const profileForGate = await client.query(
+            'SELECT facebook, instagram, linkedin FROM profiles WHERE user_id = $1',
+            [userId]
+        );
+        const gate = checkRequiredHandles(event, profileForGate.rows[0] ?? null);
+        if (!gate.ok) {
+            await client.query('ROLLBACK');
+            return res.status(403).json(socialHandlesRequiredResponse(gate.missing));
         }
 
         // Invite-only gate: an accepted invitation is required before purchase.

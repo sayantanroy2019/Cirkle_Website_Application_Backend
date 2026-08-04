@@ -3,7 +3,7 @@ import bcrypt from 'bcrypt';
 import { pool } from '../config/db.js';
 import authenticateAdmin from '../middlewares/authenticateAdmin.js';
 import { recordAudit, diffChanges } from '../utils/audit.js';
-import { normalizeInstagram } from '../utils/instagram.js';
+import { normalizeInstagram } from '../utils/socialHandles.js';
 
 const adminOrganizersRouter = express.Router();
 

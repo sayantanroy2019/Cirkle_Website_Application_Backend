@@ -2,6 +2,7 @@ import express from 'express';
 import {pool} from '../config/db.js';
 import authenticate from '../middlewares/auth.js';
 import { objectExists, getPhotoViewUrls } from '../utils/s3.js';
+import { HANDLE_NORMALIZERS, SOCIAL_PLATFORMS } from '../utils/socialHandles.js';
 
 const profileRouter = express.Router();
 
@@ -20,7 +21,10 @@ profileRouter.get('/me', authenticate, async (req, res) => {
                 p.city_id,
                 p.email,
                 p.bio,
-                p.tagline
+                p.tagline,
+                p.facebook,
+                p.instagram,
+                p.linkedin
              FROM profiles p
              WHERE p.user_id = $1`,
             [req.user.userId]
@@ -62,6 +66,9 @@ profileRouter.get('/me', authenticate, async (req, res) => {
                 email:         profile.email,
                 bio:           profile.bio,
                 tagline:       profile.tagline,
+                facebook:      profile.facebook,
+                instagram:     profile.instagram,
+                linkedin:      profile.linkedin,
                 photos:        photosResult.rows.map(p => ({
                     id:       p.id,
                     url:      viewUrls[p.s3_key],
@@ -92,6 +99,22 @@ profileRouter.patch('/me', authenticate, async (req, res) => {
         gender, cityId, email,
         lifestyleTagIds, photos
     } = req.body;
+
+    // Social handles — normalized to bare handles, '' clears to null.
+    // Validated up front with everything else, before the DB is touched.
+    const normalizedHandles = {};
+    for (const platform of SOCIAL_PLATFORMS) {
+        if (req.body[platform] === undefined) {
+            continue;
+        }
+        try {
+            normalizedHandles[platform] = HANDLE_NORMALIZERS[platform](req.body[platform]);
+        } catch {
+            return res.status(400).json({
+                error: `Invalid ${platform} handle. Enter your handle or profile URL.`
+            });
+        }
+    }
 
     // ── Validations (before touching the DB) ──────────────────────────
 
@@ -226,6 +249,10 @@ profileRouter.patch('/me', authenticate, async (req, res) => {
         if (email !== undefined) {
             profileUpdates.push(`email = $${paramCount++}`);
             profileValues.push(email.toLowerCase().trim());
+        }
+        for (const [platform, handle] of Object.entries(normalizedHandles)) {
+            profileUpdates.push(`${platform} = $${paramCount++}`);
+            profileValues.push(handle);
         }
 
         if (profileUpdates.length > 0) {

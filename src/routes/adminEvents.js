@@ -9,7 +9,7 @@ import {
     createEventImageUploadUrl,
     createArtistPhotoUploadUrl
 } from '../utils/s3.js';
-import { normalizeInstagram } from '../utils/instagram.js';
+import { normalizeInstagram } from '../utils/socialHandles.js';
 
 const adminEventsRouter = express.Router();
 
@@ -17,8 +17,11 @@ const ALLOWED_EVENT_TYPES = ['open', 'invite_only'];
 const EDITABLE_COLUMNS = [
     'name', 'category_id', 'city_id', 'starts_at', 'ends_at',
     'price', 'capacity', 'target_group_size', 'event_type',
-    'venue_name', 'venue_address', 'description', 'organizer_id'
+    'venue_name', 'venue_address', 'description', 'organizer_id',
+    'require_facebook', 'require_instagram', 'require_linkedin'
 ];
+
+const REQUIREMENT_FLAGS = ['requireFacebook', 'requireInstagram', 'requireLinkedin'];
 
 // Both admin roles may manage events — not gated by manage_admins.
 adminEventsRouter.use(authenticateAdmin);
@@ -39,6 +42,9 @@ function toResponse(row) {
         venueAddress:    row.venue_address,
         description:     row.description,
         organizerId:     row.organizer_id,
+        requireFacebook:  row.require_facebook,
+        requireInstagram: row.require_instagram,
+        requireLinkedin:  row.require_linkedin,
         createdAt:       row.created_at,
         updatedAt:       row.updated_at
     };
@@ -99,6 +105,12 @@ function validateEventFields(body, { partial }) {
         return `eventType must be one of: ${ALLOWED_EVENT_TYPES.join(', ')}`;
     }
 
+    for (const flag of REQUIREMENT_FLAGS) {
+        if (body[flag] !== undefined && typeof body[flag] !== 'boolean') {
+            return `${flag} must be a boolean`;
+        }
+    }
+
     return null;
 }
 
@@ -150,17 +162,20 @@ adminEventsRouter.post('/', async (req, res) => {
             `INSERT INTO events (
                 name, category_id, city_id, starts_at, ends_at,
                 price, capacity, target_group_size, event_type,
-                venue_name, venue_address, description, organizer_id
+                venue_name, venue_address, description, organizer_id,
+                require_facebook, require_instagram, require_linkedin
              ) VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7, $8, COALESCE($9, 'open'),
-                $10, $11, $12, $13
+                $10, $11, $12, $13,
+                COALESCE($14, false), COALESCE($15, false), COALESCE($16, false)
              )
              RETURNING *`,
             [
                 name.trim(), categoryId, cityId, startsAt, endsAt ?? null,
                 price, capacity ?? null, targetGroupSize, eventType ?? null,
-                venueName ?? null, venueAddress ?? null, description ?? null, organizerId ?? null
+                venueName ?? null, venueAddress ?? null, description ?? null, organizerId ?? null,
+                req.body.requireFacebook ?? null, req.body.requireInstagram ?? null, req.body.requireLinkedin ?? null
             ]
         );
         const event = inserted.rows[0];
@@ -355,7 +370,10 @@ adminEventsRouter.patch('/:id', async (req, res) => {
             venue_name:         req.body.venueName,
             venue_address:      req.body.venueAddress,
             description:        req.body.description,
-            organizer_id:       organizerId
+            organizer_id:       organizerId,
+            require_facebook:   req.body.requireFacebook,
+            require_instagram:  req.body.requireInstagram,
+            require_linkedin:   req.body.requireLinkedin
         };
 
         const updates = [];

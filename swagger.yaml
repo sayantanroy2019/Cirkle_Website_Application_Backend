@@ -180,13 +180,28 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '403':
-          description: Invite-only event — an accepted invitation is required before purchase
+          description: |
+            Blocked by a gate. Two distinct shapes — branch on the `error` field, not the prose:
+
+            - `social_handles_required` — the event requires social handles the user hasn't supplied. Carries a `missing` array. This gate runs FIRST, before the invitation and capacity checks.
+            - otherwise — invite-only event, an accepted invitation is required.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
-              example:
-                error: An accepted invitation is required to buy a ticket to this event
+                oneOf:
+                  - $ref: '#/components/schemas/SocialHandlesRequired'
+                  - $ref: '#/components/schemas/Error'
+              examples:
+                socialHandlesRequired:
+                  summary: Missing required social handles
+                  value:
+                    error: social_handles_required
+                    missing: [instagram, linkedin]
+                    message: This event requires your instagram, linkedin handles.
+                invitationRequired:
+                  summary: Invite-only event, no accepted invitation
+                  value:
+                    error: An accepted invitation is required to buy a ticket to this event
         '404':
           description: Event not found
           content:
@@ -2759,6 +2774,26 @@ paths:
                   type: string
                   format: email
                   example: sayantan@cirkle.live
+                facebook:
+                  type: string
+                  nullable: true
+                  description: >-
+                    Handle, @handle, profile URL, or facebook.com/profile.php?id=N
+                    — normalized to the bare handle on write. Send '' or null to
+                    clear. An unparseable value returns 400. Optional: there is no
+                    onboarding step for these, they're set here or from the
+                    just-in-time dialog when an event requires them.
+                  example: https://facebook.com/sayantan.roy
+                instagram:
+                  type: string
+                  nullable: true
+                  description: Handle, @handle, or profile URL — normalized to the bare handle. '' or null clears.
+                  example: '@sayantanroy'
+                linkedin:
+                  type: string
+                  nullable: true
+                  description: Vanity slug or a linkedin.com/in/<slug> URL — normalized to the bare slug. '' or null clears.
+                  example: https://www.linkedin.com/in/sayantan-roy/
                 lifestyleTagIds:
                   type: array
                   minItems: 3
@@ -2896,6 +2931,107 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /events/{id}/attendees:
+    get:
+      tags: [Events]
+      summary: Who's going to this event
+      description: |
+        The attendee roster behind the "Who's Going" section on event detail.
+
+        **Visibility:** any logged-in user may read this for any event. Holding a ticket is NOT required — the list is social proof that drives bookings, so gating it behind a purchase would defeat its purpose.
+
+        **What it does not contain:** no phone, no email, no lastName, no bio, no social handles, no date of birth. The backing query selects only the columns in PersonCard, so none of those can appear even if the response builder were wrong. This is narrower than the organizer-facing attendee card, which deliberately includes social handles — see OrganizerProfileCard.
+
+        **One row per person, not per ticket.** A user holding two tickets to the same event appears once, and `total` is a distinct count of people, so "24 attending" means 24 people.
+
+        **The viewer's own row** is included when they hold a ticket, flagged `isYou: true` rather than filtered out — otherwise `total` would disagree with the roster. (This differs from GET /vibes, which excludes the viewer because it's a discovery feed, not a roster.)
+
+        No date filter: past and in-progress events still return their attendees.
+
+        Each entry carries the full profile card, so tapping a person renders their profile from this payload with no follow-up request.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Event UUID
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 100
+          description: Clamped to 100
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+          description: An offset beyond the end returns an empty data array and the true total
+      responses:
+        '200':
+          description: The attendee roster. Empty data with total 0 when nobody is attending — never a 404.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/EventAttendee'
+                  total:
+                    type: integer
+                    description: Distinct attendees for the whole event, independent of limit/offset
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+              example:
+                data:
+                  - id: 3f8a1c22-6d54-4e91-b0a7-2c9e5f1d8b34
+                    firstName: Priya
+                    age: 26
+                    gender: woman
+                    tagline: Always up for an adventure
+                    photos:
+                      - url: https://cirkle-user-photos.s3.ap-south-1.amazonaws.com/profiles/3f8a1c22/photo-0.jpg?X-Amz-Signature=...
+                        position: 0
+                    lifestyleTags:
+                      - label: Live music
+                        category: Music
+                    isYou: false
+                  - id: 91b4e7d0-2a18-4c63-8f52-7e0d3a6c9b15
+                    firstName: Rahul
+                    age: 29
+                    gender: man
+                    tagline: null
+                    photos: []
+                    lifestyleTags: []
+                    isYou: true
+                total: 24
+                limit: 50
+                offset: 0
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Event not found
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /events/{id}/invitations:
     post:
       tags: [Events]
@@ -2935,6 +3071,17 @@ paths:
                 error: This event does not require an invitation
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: |
+            The event requires social handles the user hasn't supplied. Checked before the request row is created, so the organizer is guaranteed to see the required handles on every request card they decide on.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SocialHandlesRequired'
+              example:
+                error: social_handles_required
+                missing: [instagram]
+                message: This event requires your instagram handle.
         '404':
           description: Event not found
           content:
@@ -3135,6 +3282,20 @@ components:
           type: string
           format: uuid
           nullable: true
+        requireFacebook:
+          type: boolean
+          description: >-
+            Settable on create and PATCH. Requires the attendee to have supplied
+            a Facebook handle before buying or requesting an invitation. Not
+            retroactive — evaluated only at the moment of purchase/request, so
+            turning it on never invalidates tickets already sold. Changes are
+            captured in the event's audit_log diff.
+        requireInstagram:
+          type: boolean
+          description: As requireFacebook, for Instagram.
+        requireLinkedin:
+          type: boolean
+          description: As requireFacebook, for LinkedIn.
         organizerName:
           type: string
           nullable: true
@@ -3614,6 +3775,8 @@ components:
       type: object
       description: |
         The base profile-card shape shared by OrganizerAttendee and OrganizerInvitation. Deliberately has NO phone and NO email properties — the backend's fetchAttendeeProfiles() never selects those columns in the first place, so there's nothing to leak even if a serializer bug existed. Organizers get profile cards only; Cirkle handles all attendee communication.
+
+        Social handles (facebook/instagram/linkedin) ARE included: an event can require them before a user may buy or request an invitation, and the organizer needs to see them when deciding. That is a deliberate widening of the visible set — it does not extend to contact info, which remains absent by construction.
       properties:
         userId:
           type: string
@@ -3636,6 +3799,18 @@ components:
         tagline:
           type: string
           nullable: true
+        facebook:
+          type: string
+          nullable: true
+          description: Bare handle, null if the attendee hasn't given one. Self-entered, not OAuth-verified.
+        instagram:
+          type: string
+          nullable: true
+          description: Bare handle, null if the attendee hasn't given one. Self-entered, not OAuth-verified.
+        linkedin:
+          type: string
+          nullable: true
+          description: Bare vanity slug, null if the attendee hasn't given one. Self-entered, not OAuth-verified.
         photos:
           type: array
           items:
@@ -3802,6 +3977,25 @@ components:
           type: string
           nullable: true
           example: Always up for an adventure
+        facebook:
+          type: string
+          nullable: true
+          description: >-
+            Bare handle. Accepts a handle, @handle, profile URL, or
+            facebook.com/profile.php?id=N on write; always stored and returned
+            bare. Send '' or null to clear. Self-entered — OAuth verification
+            is deferred, so this proves intent, not identity.
+          example: sayantan.roy
+        instagram:
+          type: string
+          nullable: true
+          description: Bare handle. Same write/normalization rules as facebook.
+          example: sayantanroy
+        linkedin:
+          type: string
+          nullable: true
+          description: Bare vanity slug. A linkedin.com/in/<slug> URL normalizes to <slug>.
+          example: sayantan-roy
         photos:
           type: array
           items:
@@ -3810,6 +4004,31 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/LifestyleTag'
+
+    SocialHandlesRequired:
+      type: object
+      description: >-
+        The 403 returned by POST /payments/orders and POST /events/{id}/invitations
+        when the event requires social handles the user hasn't supplied.
+
+        Branch on `error` — it distinguishes this from every other 403 on those
+        endpoints (an invite-only event needing an accepted invitation returns a
+        different body). Use `missing` to decide which fields the handle dialog
+        should show. Never parse `message`.
+      properties:
+        error:
+          type: string
+          enum: [social_handles_required]
+        missing:
+          type: array
+          description: Exactly the required handles the user lacks, in a stable order.
+          items:
+            type: string
+            enum: [facebook, instagram, linkedin]
+          example: [instagram, linkedin]
+        message:
+          type: string
+          description: Human-readable, for logging or a fallback. Not a stable contract.
 
     Event:
       type: object
@@ -3872,6 +4091,19 @@ components:
           description: The lineup, ordered by position (0 = headliner). Empty array when the event has no artists. Only present on GET /events/{id}, not the list endpoint.
           items:
             $ref: '#/components/schemas/EventArtist'
+        requireFacebook:
+          type: boolean
+          description: >-
+            Whether this event requires the user's Facebook handle before they
+            may buy a ticket or request an invitation. Exposed so the app can
+            warn up front; the gate itself is enforced server-side at purchase
+            and request time. Only present on GET /events/{id}.
+        requireInstagram:
+          type: boolean
+          description: As requireFacebook, for Instagram.
+        requireLinkedin:
+          type: boolean
+          description: As requireFacebook, for LinkedIn.
         organizerInstagram:
           type: string
           nullable: true
@@ -4030,6 +4262,63 @@ components:
               nullable: true
               description: Presigned GET URL, ~1 hour TTL. Never a raw S3 key — the bucket is private. Null if the event has no banner.
 
+    PersonCard:
+      type: object
+      description: >-
+        How one other person is shown to a consumer — the shape returned by
+        both GET /vibes (as VibeCard.person) and GET /events/{id}/attendees.
+        Defined once so the two can never drift.
+
+        Narrower than the organizer-facing OrganizerProfileCard by design. It
+        carries no lastName, no bio, and no social handles, and — like every
+        consumer response — no phone or email. The backing query
+        (fetchPublicAttendeeProfiles) never selects those columns, so they
+        cannot appear even if a serializer were wrong. age is computed in SQL;
+        date_of_birth is never selected.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The person's user id
+        firstName:
+          type: string
+          example: Priya
+        age:
+          type: integer
+          example: 26
+          description: Derived from date of birth in SQL — the DOB itself is never returned
+        gender:
+          $ref: '#/components/schemas/Gender'
+        tagline:
+          type: string
+          nullable: true
+          example: Always up for an adventure
+        photos:
+          type: array
+          description: Empty array when the person has no photos — render an initial-based avatar
+          items:
+            $ref: '#/components/schemas/CardPhoto'
+        lifestyleTags:
+          type: array
+          items:
+            $ref: '#/components/schemas/CardLifestyleTag'
+
+    EventAttendee:
+      description: >-
+        One person attending an event. PersonCard plus isYou. Carries the full
+        card, so tapping a name can render their profile straight from this
+        payload without a second request — there is no profile-by-id endpoint.
+      allOf:
+        - $ref: '#/components/schemas/PersonCard'
+        - type: object
+          properties:
+            isYou:
+              type: boolean
+              description: >-
+                True on the viewer's own row. The viewer is included when they
+                hold a ticket, flagged rather than filtered out, so that total
+                always equals the real number of people attending.
+
     VibeCard:
       type: object
       description: One upcoming ticket held by someone other than the viewer.
@@ -4038,31 +4327,7 @@ components:
           type: string
           format: uuid
         person:
-          type: object
-          properties:
-            id:
-              type: string
-              format: uuid
-            firstName:
-              type: string
-              example: Priya
-            age:
-              type: integer
-              example: 26
-            gender:
-              $ref: '#/components/schemas/Gender'
-            tagline:
-              type: string
-              nullable: true
-              example: Always up for an adventure
-            photos:
-              type: array
-              items:
-                $ref: '#/components/schemas/CardPhoto'
-            lifestyleTags:
-              type: array
-              items:
-                $ref: '#/components/schemas/CardLifestyleTag'
+          $ref: '#/components/schemas/PersonCard'
         event:
           type: object
           properties:

@@ -3,7 +3,7 @@ import request from 'supertest';
 import bcrypt from 'bcrypt';
 import { createApp } from '../src/app.js';
 import { pool } from '../src/config/db.js';
-import { normalizeInstagram } from '../src/utils/instagram.js';
+import { normalizeInstagram } from '../src/utils/socialHandles.js';
 
 const app = createApp();
 
@@ -95,10 +95,10 @@ describe('normalizeInstagram', () => {
     });
 
     it('rejects things that are not plausible handles', () => {
-        expect(() => normalizeInstagram('not a handle')).toThrow('INVALID_INSTAGRAM');
-        expect(() => normalizeInstagram('user@example.com')).toThrow('INVALID_INSTAGRAM');
-        expect(() => normalizeInstagram('https://twitter.com/someone')).toThrow('INVALID_INSTAGRAM');
-        expect(() => normalizeInstagram('a'.repeat(31))).toThrow('INVALID_INSTAGRAM');
+        expect(() => normalizeInstagram('not a handle')).toThrow('INVALID_HANDLE');
+        expect(() => normalizeInstagram('user@example.com')).toThrow('INVALID_HANDLE');
+        expect(() => normalizeInstagram('https://twitter.com/someone')).toThrow('INVALID_HANDLE');
+        expect(() => normalizeInstagram('a'.repeat(31))).toThrow('INVALID_HANDLE');
     });
 
 });

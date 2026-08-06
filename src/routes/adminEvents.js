@@ -10,6 +10,15 @@ import {
     createArtistPhotoUploadUrl
 } from '../utils/s3.js';
 import { normalizeInstagram } from '../utils/socialHandles.js';
+import {
+    validateCategoriesPayload,
+    validateCatalogIds,
+    findBlockedCategoryChanges,
+    ticketsSoldByCategory,
+    replaceEventCategories,
+    fetchEventCategories,
+    buildCapacitySummary
+} from '../utils/eventCategories.js';
 
 const adminEventsRouter = express.Router();
 
@@ -83,10 +92,16 @@ function validateEventFields(body, { partial }) {
         }
     }
 
-    if (!partial && (price === undefined || price === null)) {
-        return 'price is required';
-    }
-    if (price !== undefined && (!Number.isInteger(price) || price < 0)) {
+    // price and capacity are VESTIGIAL as of ticket categories (Part 2).
+    // Price now lives per category on event_ticket_categories, and capacity is
+    // derived from admits_count * ticket_quantity summed across categories.
+    //
+    // Neither is required from the admin any more — the event form no longer
+    // sends them. They are still accepted and still validated when sent,
+    // because checkout, coupons and the organizer dashboard continue to read
+    // events.price / events.capacity until Part 4 rewires them. events.price
+    // is NOT NULL, so create defaults it to 0 rather than failing.
+    if (price !== undefined && price !== null && (!Number.isInteger(price) || price < 0)) {
         return 'price must be a non-negative integer (paise)';
     }
 
@@ -136,6 +151,18 @@ adminEventsRouter.post('/', async (req, res) => {
         return res.status(400).json({ error: 'cityId is required' });
     }
 
+    // Categories are optional at create — an event may start as a draft and be
+    // configured afterwards, the same create-then-configure flow images and
+    // the artist lineup already use. A category-less event simply can't be
+    // purchased; Part 4 enforces that at checkout.
+    const categories = req.body.categories;
+    if (categories !== undefined) {
+        const categoriesError = validateCategoriesPayload(categories);
+        if (categoriesError) {
+            return res.status(400).json({ error: categoriesError });
+        }
+    }
+
     const client = await pool.connect();
 
     try {
@@ -166,31 +193,52 @@ adminEventsRouter.post('/', async (req, res) => {
                 require_facebook, require_instagram, require_linkedin
              ) VALUES (
                 $1, $2, $3, $4, $5,
-                $6, $7, $8, COALESCE($9, 'open'),
+                COALESCE($6, 0), $7, $8, COALESCE($9, 'open'),
                 $10, $11, $12, $13,
                 COALESCE($14, false), COALESCE($15, false), COALESCE($16, false)
              )
              RETURNING *`,
             [
                 name.trim(), categoryId, cityId, startsAt, endsAt ?? null,
-                price, capacity ?? null, targetGroupSize, eventType ?? null,
+                // price defaults to 0: the column is NOT NULL and vestigial —
+                // real prices live per category. Part 4 drops this.
+                price ?? null, capacity ?? null, targetGroupSize, eventType ?? null,
                 venueName ?? null, venueAddress ?? null, description ?? null, organizerId ?? null,
                 req.body.requireFacebook ?? null, req.body.requireInstagram ?? null, req.body.requireLinkedin ?? null
             ]
         );
         const event = inserted.rows[0];
 
+        if (categories !== undefined) {
+            const catalogError = await validateCatalogIds(client, categories);
+            if (catalogError) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ error: catalogError });
+            }
+            await replaceEventCategories(client, event.id, categories);
+        }
+
         await recordAudit(client, {
             adminId: req.admin.adminId,
             action: 'create',
             entityType: 'event',
             entityId: event.id,
-            changes: toResponse(event)
+            changes: {
+                ...toResponse(event),
+                ...(categories !== undefined ? { categories } : {})
+            }
         });
 
         await client.query('COMMIT');
 
-        res.status(201).json({ event: toResponse(event) });
+        const saved = await fetchEventCategories(event.id);
+        res.status(201).json({
+            event: {
+                ...toResponse(event),
+                categories: saved,
+                capacitySummary: buildCapacitySummary(saved)
+            }
+        });
 
     } catch (err) {
         await client.query('ROLLBACK');
@@ -284,9 +332,13 @@ adminEventsRouter.get('/:id', async (req, res) => {
         const allKeys = [row.banner_s3_key, ...galleryResult.rows.map(p => p.s3_key)].filter(Boolean);
         const viewUrls = await getPhotoViewUrls(allKeys);
 
+        const categories = await fetchEventCategories(id);
+
         res.json({
             event: {
                 ...toResponse(row),
+                categories,
+                capacitySummary: buildCapacitySummary(categories),
                 bannerUrl: row.banner_s3_key ? viewUrls[row.banner_s3_key] : null,
                 // s3Key is exposed here (admin only) because PUT /gallery is a
                 // full replace — to keep an existing photo the admin has to
@@ -327,6 +379,17 @@ adminEventsRouter.patch('/:id', async (req, res) => {
     const validationError = validateEventFields(req.body, { partial: true });
     if (validationError) {
         return res.status(400).json({ error: validationError });
+    }
+
+    // Sending `categories` replaces the event's whole category set. Omitting
+    // it leaves the categories untouched, so a PATCH that only edits the venue
+    // can't wipe the ticketing config.
+    const categories = req.body.categories;
+    if (categories !== undefined) {
+        const categoriesError = validateCategoriesPayload(categories);
+        if (categoriesError) {
+            return res.status(400).json({ error: categoriesError });
+        }
     }
 
     const client = await pool.connect();
@@ -388,24 +451,64 @@ adminEventsRouter.patch('/:id', async (req, res) => {
             }
         }
 
-        if (updates.length === 0) {
+        // A PATCH carrying only `categories` is a legitimate edit — the
+        // ticketing config is the change.
+        if (updates.length === 0 && categories === undefined) {
             return res.status(400).json({ error: 'No fields to update' });
         }
 
         values.push(id);
 
+        // Guards run before anything is written, so a rejected category edit
+        // leaves the event exactly as it was.
+        let existingCategories = [];
+        if (categories !== undefined) {
+            const existingResult = await client.query(
+                `SELECT etc.category_id, tc.name AS category_name
+                 FROM event_ticket_categories etc
+                 JOIN ticket_categories tc ON tc.id = etc.category_id
+                 WHERE etc.event_id = $1`,
+                [id]
+            );
+            existingCategories = existingResult.rows;
+
+            const catalogError = await validateCatalogIds(client, categories, existingCategories);
+            if (catalogError) {
+                return res.status(400).json({ error: catalogError });
+            }
+
+            const soldCounts = await ticketsSoldByCategory(id);
+            const blocked = findBlockedCategoryChanges(existingCategories, categories, soldCounts);
+            if (blocked) {
+                return res.status(409).json({ error: blocked });
+            }
+        }
+
         await client.query('BEGIN');
 
-        const afterResult = await client.query(
-            `UPDATE events
-             SET ${updates.join(', ')}, updated_at = now()
-             WHERE id = $${paramCount}
-             RETURNING *`,
-            values
-        );
-        const after = afterResult.rows[0];
+        let after = before;
+        if (updates.length > 0) {
+            const afterResult = await client.query(
+                `UPDATE events
+                 SET ${updates.join(', ')}, updated_at = now()
+                 WHERE id = $${paramCount}
+                 RETURNING *`,
+                values
+            );
+            after = afterResult.rows[0];
+        }
+
+        if (categories !== undefined) {
+            await replaceEventCategories(client, id, categories);
+        }
 
         const changes = diffChanges(before, after, EDITABLE_COLUMNS);
+        if (categories !== undefined) {
+            changes.categories = {
+                from: existingCategories.map(c => c.category_name),
+                to:   categories.map(c => c.categoryId)
+            };
+        }
 
         if (Object.keys(changes).length > 0) {
             await recordAudit(client, {
@@ -419,7 +522,14 @@ adminEventsRouter.patch('/:id', async (req, res) => {
 
         await client.query('COMMIT');
 
-        res.json({ event: toResponse(after) });
+        const savedCategories = await fetchEventCategories(id);
+        res.json({
+            event: {
+                ...toResponse(after),
+                categories: savedCategories,
+                capacitySummary: buildCapacitySummary(savedCategories)
+            }
+        });
 
     } catch (err) {
         await client.query('ROLLBACK');

@@ -66,6 +66,13 @@ tags:
     description: Global read-only view of all invitation activity across every organizer. Both admin roles.
   - name: Admin — Users
     description: Read-only user oversight and the support-lookup screen. Both admin roles. Phone and email are unmasked PII for now — see the Admin — Users schema notes.
+  - name: Admin — Ticket Categories
+    description: |
+      The global catalogue of ticket category NAMES ("Single Pass", "Couple Pass", "Group of 4") — admin-managed reference data, like cities. Both admin roles.
+
+      Names only. Price, admits-count and inventory are set per event on event_ticket_categories, not here, because the same name costs different amounts at different events.
+
+      There is no DELETE. A name may be referenced by events (and later by tickets and orders), so removal is retirement via isActive=false, which hides it from the dropdown without touching anything that already references it.
   - name: Organizer
     description: |
       The organizer-facing dashboard: read-only event/attendee/invitation views scoped to the logged-in organizer, plus one write action (invitation accept/reject). Separate identity space and JWT secret (ORGANIZER_JWT_SECRET) from both attendee and admin auth.
@@ -1069,7 +1076,7 @@ paths:
           application/json:
             schema:
               type: object
-              required: [name, categoryId, cityId, startsAt, price, targetGroupSize]
+              required: [name, categoryId, cityId, startsAt, targetGroupSize]
               properties:
                 name:
                   type: string
@@ -1089,11 +1096,32 @@ paths:
                   nullable: true
                 price:
                   type: integer
-                  description: Paise, ₹500 = 50000
+                  deprecated: true
+                  description: >-
+                    VESTIGIAL — price now lives per ticket category. No longer
+                    required; defaults to 0 when omitted. Still accepted and
+                    still written because checkout, coupons and the organizer
+                    dashboard read events.price until Part 4 rewires them. The
+                    admin event form should stop sending it.
                 capacity:
                   type: integer
                   nullable: true
-                  description: Omit or null for uncapped
+                  deprecated: true
+                  description: >-
+                    VESTIGIAL — capacity is now derived from the categories as
+                    SUM(admitsCount × ticketQuantity). Still accepted and read
+                    by checkout until Part 4. The admin event form should stop
+                    sending it.
+                categories:
+                  type: array
+                  description: >-
+                    Optional at create. Omit to create a draft and configure
+                    ticketing afterwards via PATCH — the same
+                    create-then-configure flow used for images and the artist
+                    lineup. A category-less event simply cannot be purchased
+                    (enforced at checkout in Part 4).
+                  items:
+                    $ref: '#/components/schemas/EventTicketCategoryInput'
                 targetGroupSize:
                   type: integer
                 eventType:
@@ -1277,6 +1305,22 @@ paths:
                   type: string
                   format: uuid
                   nullable: true
+                categories:
+                  type: array
+                  description: >-
+                    REPLACES the event's entire category set. Omit to leave
+                    ticketing untouched — a PATCH that only edits the venue
+                    cannot wipe the categories. Send `[]` to clear them.
+
+                    Matching is by categoryId, and rows are updated in place
+                    rather than deleted and reinserted, so an
+                    event_ticket_categories id stays stable across edits. That
+                    matters because Part 4 will point tickets at those rows.
+
+                    A PATCH carrying only `categories` is valid and does not
+                    return "No fields to update".
+                  items:
+                    $ref: '#/components/schemas/EventTicketCategoryInput'
       responses:
         '200':
           description: Event updated
@@ -1288,13 +1332,28 @@ paths:
                   event:
                     $ref: '#/components/schemas/AdminEvent'
         '400':
-          description: Validation error, or no fields provided to update
+          description: >-
+            Validation error, no fields provided to update, an unknown
+            categoryId, a retired category being newly added, a duplicate
+            categoryId, or an invalid admitsCount / pricePaise / ticketQuantity
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: >-
+            The category change would destroy sold tickets — removing a
+            category that has sales, or cutting its ticketQuantity below the
+            number already sold. Blocked rather than silently applied.
+            (Inert until Part 4 records per-category sales.)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Cannot remove the "Couple Pass" category — 3 ticket(s) have already been sold in it
         '404':
           description: Event not found
           content:
@@ -2126,6 +2185,165 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/ticket-categories:
+    get:
+      tags: [Admin — Ticket Categories]
+      summary: List the ticket category catalogue
+      description: |
+        **This is the read path the admin event form uses to populate its category dropdown.** Call it with `isActive=true` — retired names must not be offered when configuring a new event, even though events that already reference them keep working.
+
+        Deliberately an admin endpoint rather than an addition to `/reference/*`. The `/reference/*` set is unauthenticated because the consumer app needs cities, event categories and lifestyle tags. Nothing consumer-facing needs this catalogue in Part 1, and the admin portal is already authenticated, so adding a public surface would widen the API for no caller. If a later part needs category names on the consumer event page, they will arrive nested in the event payload rather than as a second public reference list.
+
+        Sorted by name.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: isActive
+          required: false
+          schema:
+            type: boolean
+          description: Omit for the whole catalogue. `true` gives the dropdown set; `false` gives only retired names.
+      responses:
+        '200':
+          description: The catalogue
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ticketCategories:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TicketCategory'
+        '400':
+          description: isActive was neither true nor false
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [Admin — Ticket Categories]
+      summary: Add a name to the catalogue
+      description: |
+        Names are normalized on write: trimmed, and internal runs of whitespace collapsed, so `'  Couple   Pass '` stores as `'Couple Pass'`.
+
+        **Uniqueness is case-insensitive** — `VIP` and `vip` are the same name and the second returns 409. This is enforced by a unique index on `lower(name)`, not only by the pre-check, so a race between two admins still cannot create a duplicate.
+
+        Writes an audit_log row.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  example: Couple Pass
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ticketCategory:
+                    $ref: '#/components/schemas/TicketCategory'
+        '400':
+          description: name missing, or empty after trimming
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: A category with this name already exists (case-insensitive)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: A ticket category with this name already exists
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/ticket-categories/{id}:
+    patch:
+      tags: [Admin — Ticket Categories]
+      summary: Rename or retire a catalogue entry
+      description: |
+        Partial update — send `name`, `isActive`, or both. An empty body is a 400, matching the other admin PATCH endpoints.
+
+        **Retiring (`isActive: false`) does not affect events that already reference the category.** It only removes the name from the `isActive=true` list the dropdown reads, so no new event can pick it. The id keeps resolving and every existing reference stays valid.
+
+        There is no DELETE by design: the catalogue is referenced by `event_ticket_categories` (and later by tickets and orders), so hard deletion would orphan real data.
+
+        Renaming to a name that collides with another entry returns 409, case-insensitively. Writes an audit_log row with a from/to diff — nothing is logged if the values are unchanged.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                name:
+                  type: string
+                  example: Couple Pass (VIP)
+                isActive:
+                  type: boolean
+                  description: false retires the name from the dropdown
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ticketCategory:
+                    $ref: '#/components/schemas/TicketCategory'
+        '400':
+          description: Empty body, an empty name, or a non-boolean isActive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: No fields to update
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Ticket category not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: The new name collides with another category (case-insensitive)
           content:
             application/json:
               schema:
@@ -3237,6 +3455,211 @@ components:
           maximum: 9
           description: Lineup order; 0 is the headliner
 
+    TicketCategory:
+      type: object
+      description: >-
+        One entry in the global ticket category catalogue — a reusable NAME
+        only. Price, admits-count and inventory are per-event and live on
+        EventTicketCategory, because the same name costs different amounts at
+        different events.
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          description: Trimmed, internal whitespace collapsed. Unique case-insensitively.
+          example: Couple Pass
+        isActive:
+          type: boolean
+          description: >-
+            false = retired. Hidden from the dropdown so no new event can pick
+            it, while every event already referencing it stays valid. This is
+            the only form of removal — there is no DELETE.
+        createdAt:
+          type: string
+          format: date-time
+
+    EventTicketCategory:
+      type: object
+      description: >-
+        One catalogue category as configured for one event: what it costs here,
+        how many people one such ticket admits, and how many exist.
+
+        NOT WRITABLE YET — Part 1 creates the table and this schema; the event
+        create/edit flow that populates it arrives in Part 2. Documented now so
+        the shape is settled before anything writes to it.
+
+        One booking remains one ticket = one QR. admitsCount is how many people
+        that single ticket lets in (Single Pass 1, Couple Pass 2, Group of 4 4).
+        A user buys exactly one ticket of one category, never several.
+
+        ticketQuantity is inventory in TICKETS — what the admin types. The
+        category's people-capacity is admitsCount × ticketQuantity, and the
+        event's total capacity is that summed across its categories. Both are
+        derived on read and never stored, which is why events.capacity becomes
+        vestigial (Part 4).
+      properties:
+        id:
+          type: string
+          format: uuid
+        eventId:
+          type: string
+          format: uuid
+        categoryId:
+          type: string
+          format: uuid
+          description: References the catalogue. An event lists each category at most once.
+        categoryName:
+          type: string
+          description: Denormalized from the catalogue on read, for display.
+          example: Couple Pass
+        pricePaise:
+          type: integer
+          minimum: 0
+          description: This category's price at this event, in paise
+          example: 300000
+        admitsCount:
+          type: integer
+          minimum: 1
+          description: People admitted by one ticket of this category
+          example: 2
+        ticketQuantity:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: |
+            Inventory, counted in TICKETS — not in people. Three distinct states:
+
+            - `null` — unlimited. Checkout skips the capacity check for this tier.
+            - `0` — the tier exists but has nothing to sell (sold out, or not yet stocked).
+            - `N > 0` — capped.
+
+            `null` and `0` are opposites and must never be conflated.
+          example: 50
+        peopleCapacity:
+          type: integer
+          nullable: true
+          description: >-
+            Derived, read-only: admitsCount × ticketQuantity. null when the tier
+            is unlimited — not 0, which means the opposite.
+          example: 100
+        ticketsSold:
+          type: integer
+          description: >-
+            Tickets sold in this category. Always 0 until Part 4 links tickets
+            to the category they were bought from.
+          example: 0
+        isUnlimited:
+          type: boolean
+          description: Convenience flag — true when ticketQuantity is null.
+        createdAt:
+          type: string
+          format: date-time
+
+    ConsumerTicketCategory:
+      type: object
+      description: >-
+        One buyable ticket category as the consumer app sees it — what the
+        category selector on the event page is built from.
+
+        Booleans only, deliberately. There is no ticketQuantity and no
+        "N remaining": exact inventory invites scraping and tells a buyer more
+        than they need. Whether they can buy is the entire question.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: >-
+            The event_ticket_categories row id. Send this back at checkout to
+            say which category was chosen (Part 4).
+        categoryName:
+          type: string
+          example: Couple Pass
+        pricePaise:
+          type: integer
+          example: 75000
+        admitsCount:
+          type: integer
+          minimum: 1
+          description: >-
+            People admitted by this one ticket. One booking is one ticket is
+            one QR — a Couple Pass is a single ticket admitting two.
+          example: 2
+        isUnlimited:
+          type: boolean
+          description: Unlimited stock. Never soldOut.
+        soldOut:
+          type: boolean
+          description: |
+            No room for one more ticket of THIS size:
+            `(peopleSold + admitsCount) > (admitsCount × ticketQuantity)`.
+
+            Size matters — a tier with one place spare is sold out for a Couple
+            Pass. A 0-quantity tier is always soldOut; an unlimited one never is.
+
+            **Currently always false.** Tickets do not yet record which category
+            they came from, so peopleSold is 0 for every category. The
+            derivation is correct and unit-tested; Part 4 supplies real counts
+            and it starts returning true. Do not read today's all-false values
+            as "nothing ever sells out".
+        available:
+          type: boolean
+          description: Convenience inverse of soldOut — what the buy button keys off.
+
+    EventTicketCategoryInput:
+      type: object
+      description: >-
+        One category as written by the admin. Only the four stored fields —
+        peopleCapacity, ticketsSold and isUnlimited are derived on read and are
+        never accepted on write.
+      required: [categoryId, pricePaise, admitsCount]
+      properties:
+        categoryId:
+          type: string
+          format: uuid
+          description: >-
+            Must exist in the catalogue and be active. A retired category
+            already on this event may be kept (so editing its price still
+            works), but a retired one cannot be newly added.
+        pricePaise:
+          type: integer
+          minimum: 0
+          example: 75000
+        admitsCount:
+          type: integer
+          minimum: 1
+          description: People admitted by one ticket of this category
+          example: 2
+        ticketQuantity:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: >-
+            Inventory in tickets. null (or omitted) means unlimited; 0 means
+            the tier exists with nothing to sell.
+          example: 50
+
+    CapacitySummary:
+      type: object
+      description: >-
+        Event-level rollup derived from the categories. Unlimited tiers are
+        excluded from the sums and flagged instead, so the UI can show the
+        finite subtotal while knowing to display the event total as
+        "Unlimited".
+      properties:
+        totalTickets:
+          type: integer
+          description: Sum of ticketQuantity across finite tiers only
+          example: 120
+        totalPeople:
+          type: integer
+          description: Sum of peopleCapacity across finite tiers only
+          example: 240
+        hasUnlimited:
+          type: boolean
+          description: True if any tier is unlimited — display the event total as "Unlimited"
+
     AdminEvent:
       type: object
       description: The admin's view of an event — includes fields not exposed to attendees (capacity, organizerId, timestamps).
@@ -3282,6 +3705,17 @@ components:
           type: string
           format: uuid
           nullable: true
+        categories:
+          type: array
+          description: >-
+            The event's ticket categories, each with derived read-only fields.
+            Present on GET /admin/events/{id} and echoed by create/edit.
+            Ordered by price then name. Empty for a draft event that has not
+            been configured yet.
+          items:
+            $ref: '#/components/schemas/EventTicketCategory'
+        capacitySummary:
+          $ref: '#/components/schemas/CapacitySummary'
         requireFacebook:
           type: boolean
           description: >-
@@ -4091,6 +4525,18 @@ components:
           description: The lineup, ordered by position (0 = headliner). Empty array when the event has no artists. Only present on GET /events/{id}, not the list endpoint.
           items:
             $ref: '#/components/schemas/EventArtist'
+        ticketCategories:
+          type: array
+          description: >-
+            The buyable ticket categories, cheapest first — what the category
+            selector is built from. Only present on GET /events/{id}.
+
+            Empty for an event whose ticketing has not been configured yet;
+            render "not yet available" off this rather than off soldOut. The
+            server-side purchase block for a category-less event arrives in
+            Part 4.
+          items:
+            $ref: '#/components/schemas/ConsumerTicketCategory'
         requireFacebook:
           type: boolean
           description: >-
@@ -4118,7 +4564,12 @@ components:
           description: Whether the requesting user already holds a ticket to this event (only present on GET /events/{id})
         soldOut:
           type: boolean
-          description: Whether a capped event has no seats left (only present on GET /events/{id})
+          description: |
+            Whether the event can still be bought into (only present on GET /events/{id}).
+
+            Once an event has ticket categories they are the source of truth: soldOut is true only when EVERY category is sold out, so one available tier keeps the event buyable.
+
+            An event with no categories falls back to the old event-level capacity check, and is reported `false` when uncapped. A category-less event is unconfigured, not sold out — the frontend should key its "not yet available" state off `ticketCategories` being empty, not off this flag. Part 4 removes the capacity fallback.
         eventType:
           type: string
           enum: [open, invite_only]

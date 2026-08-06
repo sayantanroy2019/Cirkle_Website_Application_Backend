@@ -23,6 +23,7 @@ import adminTicketsRouter from './routes/adminTickets.js';
 import adminRevenueRouter from './routes/adminRevenue.js';
 import adminInvitationsRouter from './routes/adminInvitations.js';
 import adminUsersRouter from './routes/adminUsers.js';
+import adminTicketCategoriesRouter from './routes/adminTicketCategories.js';
 import organizerAuthRouter from './routes/organizerAuth.js';
 import organizerEventsRouter from './routes/organizerEvents.js';
 import organizerInvitationsRouter from './routes/organizerInvitations.js';
@@ -37,7 +38,9 @@ export function createApp() {
         "http://localhost:5173",
         "http://localhost:5174",
         "http://localhost:5175",
-        "https://cirkle-website-application-frontend.vercel.app"
+        "https://cirkle-website-application-frontend.vercel.app",
+        "https://cirkle-admin-dashboard.vercel.app",
+        "https://cirkle-organiser-dashboard.vercel.app"
       ],
       credentials: true,
       allowedHeaders: ["Content-Type", "Authorization", "ngrok-skip-browser-warning"],
@@ -72,6 +75,7 @@ export function createApp() {
   app.use('/admin/revenue', adminRevenueRouter);
   app.use('/admin/invitations', adminInvitationsRouter);
   app.use('/admin/users', adminUsersRouter);
+  app.use('/admin/ticket-categories', adminTicketCategoriesRouter);
   app.use('/organizer/auth', organizerAuthRouter);
   app.use('/organizer/events', organizerEventsRouter);
   app.use('/organizer/invitations', organizerInvitationsRouter);

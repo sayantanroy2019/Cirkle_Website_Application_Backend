@@ -11,9 +11,17 @@ import { defineConfig } from 'vitest/config';
 // hookTimeout is higher still: setup hooks bcrypt-hash several passwords and
 // seed rows, and all 12 test files run in parallel against a single Supabase
 // pooler, so the slowest setup contends with 11 others.
+// Worker concurrency is capped because every test file opens its own pg pool
+// against one shared Supabase pooler. Unbounded parallelism (one worker per
+// core) starved connections badly enough that ordinary queries blocked past
+// the 30s timeout — surfacing as random failures in a different test each run,
+// never a real assertion failure. Four workers keeps most of the wall-clock
+// win without the contention.
 export default defineConfig({
     test: {
         testTimeout: 30000,
-        hookTimeout: 60000
+        hookTimeout: 60000,
+        maxWorkers: 4,
+        minWorkers: 1
     }
 });

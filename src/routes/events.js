@@ -4,6 +4,7 @@ import authenticate from '../middlewares/auth.js';
 import { getPhotoViewUrls } from '../utils/s3.js';
 import { checkRequiredHandles, socialHandlesRequiredResponse } from '../utils/socialGate.js';
 import { fetchPublicAttendeeProfiles } from '../utils/publicAttendee.js';
+import { fetchConsumerTicketCategories, areAllCategoriesSoldOut } from '../utils/eventCategories.js';
 import { parsePagination, paginatedResponse } from '../utils/pagination.js';
 
 const eventsRouter = express.Router();
@@ -153,19 +154,38 @@ eventsRouter.get('/:id', authenticate, async (req, res) => {
         );
         const userHasTicket = ticketCheck.rows.length > 0;
 
-        // Sold out? Only meaningful for capped events.
-        // taken = confirmed tickets + live holds, same formula as order creation.
-        let soldOut = false;
-        if (e.capacity !== null) {
-            const taken = await pool.query(
-                `SELECT
-                    (SELECT COUNT(*) FROM tickets WHERE event_id = $1)
-                  + (SELECT COUNT(*) FROM orders
-                     WHERE event_id = $1 AND status = 'created' AND expires_at > now())
-                 AS taken`,
-                [id]
-            );
-            soldOut = parseInt(taken.rows[0].taken, 10) >= e.capacity;
+        // Ticket categories — what the buyer actually picks between. Booleans
+        // only: no inventory counts reach the consumer.
+        const ticketCategories = await fetchConsumerTicketCategories(id);
+
+        // Sold out.
+        //
+        // Once an event has categories, they are the source of truth: the
+        // event is sold out only when every category is, so one available
+        // tier keeps it buyable.
+        //
+        // An event with no categories falls back to the old event-level
+        // capacity check. That is deliberate — a category-less event is
+        // unconfigured, not sold out, and the vacuous "all of nothing is sold
+        // out" would mislabel every draft. The fallback also keeps existing
+        // events behaving exactly as before until they are configured.
+        // Part 4 removes the capacity branch entirely.
+        let soldOut;
+        if (ticketCategories.length > 0) {
+            soldOut = areAllCategoriesSoldOut(ticketCategories);
+        } else {
+            soldOut = false;
+            if (e.capacity !== null) {
+                const taken = await pool.query(
+                    `SELECT
+                        (SELECT COUNT(*) FROM tickets WHERE event_id = $1)
+                      + (SELECT COUNT(*) FROM orders
+                         WHERE event_id = $1 AND status = 'created' AND expires_at > now())
+                     AS taken`,
+                    [id]
+                );
+                soldOut = parseInt(taken.rows[0].taken, 10) >= e.capacity;
+            }
         }
 
         // Invitation status — only meaningful for invite-only events.
@@ -227,6 +247,7 @@ eventsRouter.get('/:id', authenticate, async (req, res) => {
                     photoUrl:  a.photo_s3_key ? viewUrls[a.photo_s3_key] : null,
                     position:  a.position
                 })),
+                ticketCategories,
                 organizerInstagram: e.organizer_instagram ?? null,
                 // Exposed so the app can warn before the gate fires. The gate
                 // itself is enforced server-side at purchase/request — these

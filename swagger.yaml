@@ -844,11 +844,60 @@ paths:
           $ref: '#/components/responses/InternalError'
 
   /admin/admins/{id}:
+    get:
+      tags: [Admin — Admins]
+      summary: Get a single admin account
+      description: Same shape as the list rows. password_hash is never returned.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The admin
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  admin:
+                    $ref: '#/components/schemas/Admin'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Caller lacks the manage_admins capability
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Admin not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
     patch:
       tags: [Admin — Admins]
       summary: Update an admin account
       description: |
         Partial update — only fields present in the body are changed. Commonly used to deactivate an admin (`isActive: false`), which invalidates their existing token immediately (authenticateAdmin re-checks is_active on every request, not just at token issuance).
+
+        **Lockout protection.** Two rules make admin management unbrickable. Both return 409 with a machine-readable `error` so the client can say why:
+
+        - `cannot_deactivate_self` — nobody may deactivate their own account, unconditionally, however many other admins exist. The failure mode is losing the session you are in.
+        - `last_administrative_admin` — the population of ACTIVE administrative admins may never reach zero, whether by deactivating the last one or demoting them to business_development.
+
+        Self-demotion is deliberately NOT blanket-blocked: it is governed by the second rule alone, so an administrative admin may hand over and step down to BD as long as somebody else remains administrative.
+
+        The population count is taken under a row lock in the same transaction as the update, so two admins demoting each other simultaneously cannot both pass and leave zero.
+
+        **Password reset.** Send `password` to reset it — alone, or alongside other fields. A body containing only `password` is valid and no longer returns "No fields to update". The value is bcrypt-hashed, never returned and never logged; the audit row records only that a reset occurred, not the value. A reset changes no counts, so the lockout rules never block it — resetting your own password is always allowed.
       security: [{ bearerAuth: [] }]
       parameters:
         - in: path
@@ -870,6 +919,14 @@ paths:
                   enum: [administrative, business_development]
                 isActive:
                   type: boolean
+                password:
+                  type: string
+                  minLength: 8
+                  format: password
+                  description: >-
+                    New password. Hashed with bcrypt before storage, never
+                    returned in any response and never written to logs. May be
+                    the only field in the body.
       responses:
         '200':
           description: Admin updated
@@ -900,6 +957,33 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '409':
+          description: |
+            Blocked by lockout protection. Branch on `error`:
+
+            - `cannot_deactivate_self` — you tried to deactivate your own account.
+            - `last_administrative_admin` — the change would leave zero active administrative admins.
+            - `concurrent_admin_change` — a competing admin change collided; retry.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    enum: [cannot_deactivate_self, last_administrative_admin, concurrent_admin_change]
+                  message:
+                    type: string
+                    description: Human-readable. Branch on `error`, not on this.
+              examples:
+                self:
+                  value:
+                    error: cannot_deactivate_self
+                    message: You cannot deactivate your own account.
+                last:
+                  value:
+                    error: last_administrative_admin
+                    message: There must be at least one active administrative admin.
         '500':
           $ref: '#/components/responses/InternalError'
 

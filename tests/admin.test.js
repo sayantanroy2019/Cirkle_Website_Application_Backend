@@ -40,6 +40,9 @@ beforeAll(async () => {
 }, 30000);
 
 afterAll(async () => {
+    // PATCH /admin/admins/:id now writes audit rows, and audit_log.admin_id
+    // has an FK to admins — so these must go first.
+    await pool.query('DELETE FROM audit_log WHERE admin_id = ANY($1) OR entity_id = ANY($1)', [createdAdminIds]);
     await pool.query('DELETE FROM admins WHERE id = ANY($1)', [createdAdminIds]);
     await pool.query('DELETE FROM users WHERE phone = $1', [USER_PHONE]);
     await pool.end();

@@ -4,7 +4,12 @@ import authenticate from '../middlewares/auth.js';
 import { getPhotoViewUrls } from '../utils/s3.js';
 import { checkRequiredHandles, socialHandlesRequiredResponse } from '../utils/socialGate.js';
 import { fetchPublicAttendeeProfiles } from '../utils/publicAttendee.js';
-import { fetchConsumerTicketCategories, areAllCategoriesSoldOut } from '../utils/eventCategories.js';
+import {
+    fetchConsumerTicketCategories,
+    areAllCategoriesSoldOut,
+    categorySummariesForEvents,
+    priceRange
+} from '../utils/eventCategories.js';
 import { parsePagination, paginatedResponse } from '../utils/pagination.js';
 
 const eventsRouter = express.Router();
@@ -74,7 +79,6 @@ eventsRouter.get('/', authenticate, async (req, res) => {
                 city_id,
                 starts_at,
                 ends_at,
-                price,
                 target_group_size,
                 venue_name,
                 venue_address,
@@ -90,6 +94,11 @@ eventsRouter.get('/', authenticate, async (req, res) => {
         const bannerKeys = eventsResult.rows.map(e => e.banner_s3_key).filter(Boolean);
         const viewUrls = await getPhotoViewUrls(bannerKeys);
 
+        // One batched rollup for the whole page. This is what replaces the
+        // vestigial events.price on the card: a range across the tiers,
+        // because there is no single price any more.
+        const summaries = await categorySummariesForEvents(eventsResult.rows.map(e => e.id));
+
         res.json({
             events: eventsResult.rows.map(e => ({
                 id:              e.id,
@@ -98,7 +107,8 @@ eventsRouter.get('/', authenticate, async (req, res) => {
                 cityId:          e.city_id,
                 startsAt:        e.starts_at,
                 endsAt:          e.ends_at,
-                price:           e.price,
+                priceRange:      summaries[e.id].priceRange,
+                capacitySummary: summaries[e.id].capacitySummary,
                 targetGroupSize: e.target_group_size,
                 venueName:       e.venue_name,
                 venueAddress:    e.venue_address,
@@ -127,9 +137,9 @@ eventsRouter.get('/:id', authenticate, async (req, res) => {
         const result = await pool.query(
             `SELECT
                 e.id, e.name, e.category_id, e.city_id,
-                e.starts_at, e.ends_at, e.price, e.target_group_size,
+                e.starts_at, e.ends_at, e.target_group_size,
                 e.venue_name, e.venue_address, e.description, e.banner_s3_key,
-                e.capacity, e.event_type,
+                e.event_type,
                 e.require_facebook, e.require_instagram, e.require_linkedin,
                 -- Only the handle, nothing else about the organizer. This is
                 -- for an Instagram icon link on the detail page; the consumer
@@ -158,35 +168,13 @@ eventsRouter.get('/:id', authenticate, async (req, res) => {
         // only: no inventory counts reach the consumer.
         const ticketCategories = await fetchConsumerTicketCategories(id);
 
-        // Sold out.
+        // Sold out — now purely category-derived. The event-level capacity
+        // fallback is gone; events.capacity is no longer read anywhere.
         //
-        // Once an event has categories, they are the source of truth: the
-        // event is sold out only when every category is, so one available
-        // tier keeps it buyable.
-        //
-        // An event with no categories falls back to the old event-level
-        // capacity check. That is deliberate — a category-less event is
-        // unconfigured, not sold out, and the vacuous "all of nothing is sold
-        // out" would mislabel every draft. The fallback also keeps existing
-        // events behaving exactly as before until they are configured.
-        // Part 4 removes the capacity branch entirely.
-        let soldOut;
-        if (ticketCategories.length > 0) {
-            soldOut = areAllCategoriesSoldOut(ticketCategories);
-        } else {
-            soldOut = false;
-            if (e.capacity !== null) {
-                const taken = await pool.query(
-                    `SELECT
-                        (SELECT COUNT(*) FROM tickets WHERE event_id = $1)
-                      + (SELECT COUNT(*) FROM orders
-                         WHERE event_id = $1 AND status = 'created' AND expires_at > now())
-                     AS taken`,
-                    [id]
-                );
-                soldOut = parseInt(taken.rows[0].taken, 10) >= e.capacity;
-            }
-        }
+        // An event with no categories reports false: it is unconfigured, not
+        // sold out. The frontend keys "not yet available" off an empty
+        // ticketCategories, and checkout refuses it with not_available_for_sale.
+        const soldOut = areAllCategoriesSoldOut(ticketCategories);
 
         // Invitation status — only meaningful for invite-only events.
         // null means "no request yet" (or an open event, where it's irrelevant).
@@ -230,7 +218,7 @@ eventsRouter.get('/:id', authenticate, async (req, res) => {
                 cityId:          e.city_id,
                 startsAt:        e.starts_at,
                 endsAt:          e.ends_at,
-                price:           e.price,
+                priceRange:      priceRange(ticketCategories),
                 targetGroupSize: e.target_group_size,
                 venueName:       e.venue_name,
                 venueAddress:    e.venue_address,

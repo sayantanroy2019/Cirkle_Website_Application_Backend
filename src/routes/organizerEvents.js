@@ -4,6 +4,12 @@ import authenticateOrganizer from '../middlewares/authenticateOrganizer.js';
 import { getPhotoViewUrls } from '../utils/s3.js';
 import { parsePagination, paginatedResponse } from '../utils/pagination.js';
 import { fetchAttendeeProfiles } from '../utils/organizerAttendee.js';
+import {
+    categorySummariesForEvents,
+    fetchEventCategories,
+    buildCapacitySummary,
+    priceRange
+} from '../utils/eventCategories.js';
 
 const organizerEventsRouter = express.Router();
 
@@ -35,6 +41,8 @@ organizerEventsRouter.get('/', async (req, res) => {
         const bannerKeys = dataResult.rows.map(e => e.banner_s3_key).filter(Boolean);
         const viewUrls = await getPhotoViewUrls(bannerKeys);
 
+        const summaries = await categorySummariesForEvents(dataResult.rows.map(e => e.id));
+
         const data = dataResult.rows.map(e => ({
             id:           e.id,
             name:         e.name,
@@ -44,7 +52,10 @@ organizerEventsRouter.get('/', async (req, res) => {
             venueName:    e.venue_name,
             venueAddress: e.venue_address,
             eventType:    e.event_type,
-            capacity:     e.capacity,
+            // Capacity is derived from the tiers now, not the vestigial
+            // events.capacity column.
+            priceRange:      summaries[e.id].priceRange,
+            capacitySummary: summaries[e.id].capacitySummary,
             bannerUrl:    e.banner_s3_key ? viewUrls[e.banner_s3_key] : null,
             ticketsSold:  parseInt(e.tickets_sold, 10)
         }));
@@ -84,6 +95,8 @@ organizerEventsRouter.get('/:id', async (req, res) => {
         const allKeys = [e.banner_s3_key, ...galleryResult.rows.map(p => p.s3_key)].filter(Boolean);
         const viewUrls = await getPhotoViewUrls(allKeys);
 
+        const organizerCategories = await fetchEventCategories(id);
+
         const ticketsSoldResult = await pool.query('SELECT COUNT(*) FROM tickets WHERE event_id = $1', [id]);
 
         // Gross collected on paid orders for this event — informational
@@ -103,8 +116,11 @@ organizerEventsRouter.get('/:id', async (req, res) => {
                 cityId:          e.city_id,
                 startsAt:        e.starts_at,
                 endsAt:          e.ends_at,
-                price:           e.price,
-                capacity:        e.capacity,
+                // Price and capacity are per-tier now. The organizer sees the
+                // configured tiers rather than a single event-level number.
+                ticketCategories: organizerCategories,
+                priceRange:      priceRange(organizerCategories),
+                capacitySummary: buildCapacitySummary(organizerCategories),
                 targetGroupSize: e.target_group_size,
                 eventType:       e.event_type,
                 venueName:       e.venue_name,

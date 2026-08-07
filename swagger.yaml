@@ -99,7 +99,7 @@ paths:
           application/json:
             schema:
               type: object
-              required: [code, eventId]
+              required: [code, eventId, eventTicketCategoryId]
               properties:
                 code:
                   type: string
@@ -158,8 +158,15 @@ paths:
           application/json:
             schema:
               type: object
-              required: [eventId]
+              required: [eventId, eventTicketCategoryId]
               properties:
+                eventTicketCategoryId:
+                  type: string
+                  format: uuid
+                  description: >-
+                    Which ticket category the buyer chose — the `id` from
+                    ticketCategories on GET /events/{id}. Required: the price
+                    charged and the capacity consumed both come from it.
                 eventId:
                   type: string
                   format: uuid
@@ -216,7 +223,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: Cannot buy — already ticketed, sold out, or event started
+          description: |
+            Cannot buy. Branch on `error`:
+
+            - `category_sold_out` — the chosen tier has no room for one more ticket of its size, or has zero stock. Unlimited tiers never return this.
+            - `not_available_for_sale` — the event has no ticket categories configured, so nothing is purchasable.
+            - otherwise — already ticketed, or the event has started.
           content:
             application/json:
               schema:
@@ -3662,7 +3674,10 @@ components:
 
     AdminEvent:
       type: object
-      description: The admin's view of an event — includes fields not exposed to attendees (capacity, organizerId, timestamps).
+      description: |
+        The admin's view of an event — includes fields not exposed to attendees (organizerId, timestamps).
+
+        NOTE: `price` and `capacity` were removed in Part 4. Price is per ticket category; capacity is derived (see `capacitySummary`). The underlying columns still exist but nothing reads or writes them, and the API neither accepts nor returns them. A later cleanup drops the columns.
       properties:
         id:
           type: string
@@ -3680,13 +3695,6 @@ components:
           type: string
           format: date-time
           nullable: true
-        price:
-          type: integer
-          description: Paise
-        capacity:
-          type: integer
-          nullable: true
-          description: Null = uncapped
         targetGroupSize:
           type: integer
         eventType:
@@ -4164,12 +4172,6 @@ components:
           type: string
           format: date-time
           nullable: true
-        price:
-          type: integer
-          description: Paise
-        capacity:
-          type: integer
-          nullable: true
         targetGroupSize:
           type: integer
         eventType:
@@ -4487,10 +4489,6 @@ components:
           type: string
           format: date-time
           nullable: true
-        price:
-          type: integer
-          example: 50000
-          description: In paise. ₹500 = 50000
         targetGroupSize:
           type: integer
           example: 4
@@ -4525,6 +4523,8 @@ components:
           description: The lineup, ordered by position (0 = headliner). Empty array when the event has no artists. Only present on GET /events/{id}, not the list endpoint.
           items:
             $ref: '#/components/schemas/EventArtist'
+        priceRange:
+          $ref: '#/components/schemas/PriceRange'
         ticketCategories:
           type: array
           description: >-

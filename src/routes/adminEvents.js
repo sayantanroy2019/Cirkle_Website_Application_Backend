@@ -25,7 +25,7 @@ const adminEventsRouter = express.Router();
 const ALLOWED_EVENT_TYPES = ['open', 'invite_only'];
 const EDITABLE_COLUMNS = [
     'name', 'category_id', 'city_id', 'starts_at', 'ends_at',
-    'price', 'capacity', 'target_group_size', 'event_type',
+    'target_group_size', 'event_type',
     'venue_name', 'venue_address', 'description', 'organizer_id',
     'require_facebook', 'require_instagram', 'require_linkedin'
 ];
@@ -43,8 +43,10 @@ function toResponse(row) {
         cityId:          row.city_id,
         startsAt:        row.starts_at,
         endsAt:          row.ends_at,
-        price:           row.price,
-        capacity:        row.capacity,
+        // events.price and events.capacity are no longer surfaced. Price is
+        // per category, and capacity is derived (see capacitySummary on the
+        // detail response). The columns still exist but nothing reads them;
+        // a later cleanup drops them.
         targetGroupSize: row.target_group_size,
         eventType:       row.event_type,
         venueName:       row.venue_name,
@@ -62,7 +64,7 @@ function toResponse(row) {
 // Shared validation for fields that appear on both create and edit.
 // `partial` = true skips presence checks (PATCH only validates what's sent).
 function validateEventFields(body, { partial }) {
-    const { name, startsAt, endsAt, price, capacity, targetGroupSize, eventType } = body;
+    const { name, startsAt, endsAt, targetGroupSize, eventType } = body;
 
     if (!partial || name !== undefined) {
         if (!name || !name.trim()) {
@@ -92,22 +94,12 @@ function validateEventFields(body, { partial }) {
         }
     }
 
-    // price and capacity are VESTIGIAL as of ticket categories (Part 2).
-    // Price now lives per category on event_ticket_categories, and capacity is
-    // derived from admits_count * ticket_quantity summed across categories.
-    //
-    // Neither is required from the admin any more — the event form no longer
-    // sends them. They are still accepted and still validated when sent,
-    // because checkout, coupons and the organizer dashboard continue to read
-    // events.price / events.capacity until Part 4 rewires them. events.price
-    // is NOT NULL, so create defaults it to 0 rather than failing.
-    if (price !== undefined && price !== null && (!Number.isInteger(price) || price < 0)) {
-        return 'price must be a non-negative integer (paise)';
-    }
-
-    if (capacity !== undefined && capacity !== null && (!Number.isInteger(capacity) || capacity <= 0)) {
-        return 'capacity must be a positive integer, or null for uncapped';
-    }
+    // price and capacity are gone from the API as of Part 4. Price is per
+    // category; capacity is derived from admits_count * ticket_quantity summed
+    // across categories. The columns remain in the table but are no longer
+    // read, written meaningfully, or accepted — a later cleanup drops them.
+    // Anything still sending them is ignored rather than rejected, so an
+    // un-updated client doesn't break.
 
     if (!partial && (targetGroupSize === undefined || targetGroupSize === null)) {
         return 'targetGroupSize is required';
@@ -136,7 +128,7 @@ function validateEventFields(body, { partial }) {
 adminEventsRouter.post('/', async (req, res) => {
     const {
         name, categoryId, cityId, startsAt, endsAt,
-        price, capacity, targetGroupSize, eventType,
+        targetGroupSize, eventType,
         venueName, venueAddress, description, organizerId
     } = req.body;
 
@@ -200,9 +192,10 @@ adminEventsRouter.post('/', async (req, res) => {
              RETURNING *`,
             [
                 name.trim(), categoryId, cityId, startsAt, endsAt ?? null,
-                // price defaults to 0: the column is NOT NULL and vestigial —
-                // real prices live per category. Part 4 drops this.
-                price ?? null, capacity ?? null, targetGroupSize, eventType ?? null,
+                // price/capacity are written as dead defaults: the price
+                // column is NOT NULL and both are vestigial. Nothing reads
+                // them; a later cleanup drops the columns.
+                null, null, targetGroupSize, eventType ?? null,
                 venueName ?? null, venueAddress ?? null, description ?? null, organizerId ?? null,
                 req.body.requireFacebook ?? null, req.body.requireInstagram ?? null, req.body.requireLinkedin ?? null
             ]
@@ -426,8 +419,6 @@ adminEventsRouter.patch('/:id', async (req, res) => {
             city_id:            cityId,
             starts_at:          req.body.startsAt,
             ends_at:            req.body.endsAt,
-            price:              req.body.price,
-            capacity:           req.body.capacity,
             target_group_size:  req.body.targetGroupSize,
             event_type:         req.body.eventType,
             venue_name:         req.body.venueName,

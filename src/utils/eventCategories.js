@@ -99,21 +99,41 @@ export function buildCapacitySummary(categories) {
 }
 
 /**
- * Per-category sold counts for an event.
+ * What counts as sold, in TICKETS (units), for one event_ticket_categories row.
  *
- * PART 4 HOOK — returns all zeros today. Tickets do not yet reference the
- * event_ticket_categories row they were bought from, so there is nothing to
- * count. When Part 4 adds that column this becomes a GROUP BY and every
- * caller below starts enforcing for real, with no other change needed.
+ * Issued tickets PLUS live holds — exactly the definition the event-level
+ * capacity check has always used. A hold is an order that has taken a seat out
+ * of circulation but has no ticket yet; ignoring holds would let two buyers
+ * claim the same last seat while both are mid-payment.
+ *
+ * Paid orders are NOT counted here: confirming payment creates the ticket, so
+ * counting both would double-count every completed sale.
+ *
+ * Correlated on `etc.id`, so it drops into any query that has that row in
+ * scope — including inside the critical section under the row lock.
+ */
+const SOLD_UNITS_SQL = `(
+    (SELECT COUNT(*) FROM tickets t
+      WHERE t.event_ticket_category_id = etc.id)
+  + (SELECT COUNT(*) FROM orders o
+      WHERE o.event_ticket_category_id = etc.id
+        AND o.status = 'created'
+        AND o.expires_at > now())
+)`;
+
+/**
+ * Per-category sold counts for an event, in tickets.
  *
  * @returns {Promise<Record<string, number>>} categoryId -> tickets sold
  */
-export async function ticketsSoldByCategory(eventId) {
-    const existing = await pool.query(
-        'SELECT category_id FROM event_ticket_categories WHERE event_id = $1',
+export async function ticketsSoldByCategory(eventId, queryable = pool) {
+    const result = await queryable.query(
+        `SELECT etc.category_id, ${SOLD_UNITS_SQL} AS units
+         FROM event_ticket_categories etc
+         WHERE etc.event_id = $1`,
         [eventId]
     );
-    return Object.fromEntries(existing.rows.map(r => [r.category_id, 0]));
+    return Object.fromEntries(result.rows.map(r => [r.category_id, parseInt(r.units, 10)]));
 }
 
 /**
@@ -259,23 +279,39 @@ export function toConsumerCategory(row, peopleSold = 0) {
 }
 
 /**
- * People already admitted per category, for the sold-out maths.
- *
- * PART 4 HOOK — all zeros today, for the same reason as
- * ticketsSoldByCategory(): tickets carry no reference to the category they
- * were bought from, so there is nothing to count and every category computes
- * as not-sold-out. Correct but inert. Part 4 replaces the body with a GROUP BY
- * over tickets joined to their category, summing admits_count, and every
- * caller starts working with no other change.
+ * People already admitted per category — sold units multiplied by the tier's
+ * admits_count, since every ticket of a tier admits the same number.
  *
  * @returns {Promise<Record<string, number>>} event_ticket_categories.id -> people sold
  */
-export async function peopleSoldByCategory(eventId) {
-    const rows = await pool.query(
-        'SELECT id FROM event_ticket_categories WHERE event_id = $1',
+export async function peopleSoldByCategory(eventId, queryable = pool) {
+    const result = await queryable.query(
+        `SELECT etc.id, etc.admits_count * ${SOLD_UNITS_SQL} AS people_sold
+         FROM event_ticket_categories etc
+         WHERE etc.event_id = $1`,
         [eventId]
     );
-    return Object.fromEntries(rows.rows.map(r => [r.id, 0]));
+    return Object.fromEntries(result.rows.map(r => [r.id, parseInt(r.people_sold, 10)]));
+}
+
+/**
+ * People sold for ONE category, computed against the caller's client so it
+ * runs inside their transaction.
+ *
+ * This is the load-bearing query of the whole categories rework. It MUST be
+ * called after `SELECT ... FOR UPDATE` on the same category row, inside the
+ * same transaction. Computing it before the lock, or on a different
+ * connection, reopens the seat race the lock exists to close: two buyers would
+ * both read the old count and both find room.
+ */
+export async function peopleSoldForCategory(client, eventTicketCategoryId) {
+    const result = await client.query(
+        `SELECT etc.admits_count * ${SOLD_UNITS_SQL} AS people_sold
+         FROM event_ticket_categories etc
+         WHERE etc.id = $1`,
+        [eventTicketCategoryId]
+    );
+    return parseInt(result.rows[0].people_sold, 10);
 }
 
 /**
@@ -309,6 +345,56 @@ export async function fetchConsumerTicketCategories(eventId) {
  */
 export function areAllCategoriesSoldOut(categories) {
     return categories.length > 0 && categories.every(c => c.soldOut);
+}
+
+/**
+ * Cheapest and dearest tier, for a list card that shows "from ₹400".
+ * null when the event has no categories — there is no price to quote.
+ */
+export function priceRange(categories) {
+    if (categories.length === 0) {
+        return null;
+    }
+    const prices = categories.map(c => c.pricePaise);
+    return { minPaise: Math.min(...prices), maxPaise: Math.max(...prices) };
+}
+
+/**
+ * Batched per-event category rollup for LIST endpoints — one query for the
+ * whole page rather than one per event.
+ *
+ * Replaces what the vestigial events.price / events.capacity columns used to
+ * provide on list cards: a price to show and a capacity to size the event by.
+ *
+ * @returns {Promise<Record<string, {priceRange, capacitySummary, categoryCount}>>}
+ */
+export async function categorySummariesForEvents(eventIds) {
+    if (eventIds.length === 0) {
+        return {};
+    }
+
+    const result = await pool.query(
+        `SELECT event_id, price_paise, admits_count, ticket_quantity
+         FROM event_ticket_categories
+         WHERE event_id = ANY($1::uuid[])`,
+        [eventIds]
+    );
+
+    const byEvent = {};
+    for (const row of result.rows) {
+        (byEvent[row.event_id] ??= []).push(toCategoryResponse({ ...row, category_name: null }));
+    }
+
+    const summaries = {};
+    for (const eventId of eventIds) {
+        const cats = byEvent[eventId] ?? [];
+        summaries[eventId] = {
+            priceRange:      priceRange(cats),
+            capacitySummary: buildCapacitySummary(cats),
+            categoryCount:   cats.length
+        };
+    }
+    return summaries;
 }
 
 /**

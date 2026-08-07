@@ -9,6 +9,7 @@ import {
     getHoldDurationMinutes,
     calculatePrice
 } from '../utils/pricing.js';
+import { peopleSoldForCategory, isCategorySoldOut } from '../utils/eventCategories.js';
 
 import { verifyCheckoutSignature, confirmOrderPaid } from '../utils/payments.js';
 
@@ -25,11 +26,14 @@ const ordersRouter = express.Router();
 // This is what makes the abandon-and-retry flow work, and it is why the
 // partial unique index on orders never fires in normal use.
 ordersRouter.post('/orders', authenticate, async (req, res) => {
-    const { eventId, couponCode } = req.body;
+    const { eventId, couponCode, eventTicketCategoryId } = req.body;
     const userId = req.user.userId;
 
     if (!eventId) {
         return res.status(400).json({ error: 'Event is required' });
+    }
+    if (!eventTicketCategoryId) {
+        return res.status(400).json({ error: 'eventTicketCategoryId is required — choose a ticket category' });
     }
 
     const client = await pool.connect();
@@ -48,7 +52,7 @@ ordersRouter.post('/orders', authenticate, async (req, res) => {
         const liveHold = await client.query(
             `SELECT id, razorpay_order_id, total_paise, base_price_paise,
                     discount_paise, subtotal_paise, gst_percentage, gst_paise,
-                    expires_at
+                    expires_at, event_ticket_category_id
              FROM orders
              WHERE user_id = $1 AND event_id = $2
                AND status = 'created' AND expires_at > now()`,
@@ -65,6 +69,10 @@ ordersRouter.post('/orders', authenticate, async (req, res) => {
                 currency:        'INR',
                 expiresAt:       o.expires_at,
                 resumed:         true,
+                // The hold is per event, not per category — a user who picks a
+                // different tier while holding one gets the held tier back,
+                // not a second hold. They must let it expire or pay it.
+                eventTicketCategoryId: o.event_ticket_category_id,
                 breakdown: {
                     basePricePaise: o.base_price_paise,
                     discountPaise:  o.discount_paise,
@@ -78,13 +86,14 @@ ordersRouter.post('/orders', authenticate, async (req, res) => {
 
         await client.query('BEGIN');
 
-        // ── Lock the event row, then check availability ────────────────
-        // The lock is held for milliseconds — just this check and the insert.
-        // The seat is protected during payment by the hold row, not the lock.
+        // The event is read WITHOUT a lock now. Capacity is enforced per
+        // category, so the lock belongs on the category row — locking the
+        // event would serialize buyers of different tiers against each other
+        // for no reason.
         const eventResult = await client.query(
-            `SELECT id, price, capacity, starts_at, event_type,
+            `SELECT id, starts_at, event_type,
                     require_facebook, require_instagram, require_linkedin
-             FROM events WHERE id = $1 FOR UPDATE`,
+             FROM events WHERE id = $1`,
             [eventId]
         );
 
@@ -133,20 +142,73 @@ ordersRouter.post('/orders', authenticate, async (req, res) => {
             }
         }
 
-        // Availability = capacity - (confirmed tickets + live holds).
-        // Skipped entirely when capacity is NULL (uncapped).
-        if (event.capacity !== null) {
-            const taken = await client.query(
-                `SELECT
-                    (SELECT COUNT(*) FROM tickets WHERE event_id = $1)
-                  + (SELECT COUNT(*) FROM orders
-                     WHERE event_id = $1 AND status = 'created' AND expires_at > now())
-                 AS taken`,
+        // ── The critical section ───────────────────────────────────────
+        //
+        // Everything from here to COMMIT decides whether a seat exists and
+        // claims it. Order matters absolutely:
+        //
+        //   1. lock THIS category's row (not the event, not other categories)
+        //   2. compute people sold for it, UNDER that lock
+        //   3. decide, then insert
+        //
+        // Computing the count before the lock — or on any other connection —
+        // reopens the race: two buyers would both read the pre-lock count,
+        // both find room, and both insert. The lock is what makes step 2 see
+        // the other transaction's committed work.
+        const categoryResult = await client.query(
+            `SELECT id, price_paise, admits_count, ticket_quantity
+             FROM event_ticket_categories
+             WHERE id = $1 AND event_id = $2
+             FOR UPDATE`,
+            [eventTicketCategoryId, eventId]
+        );
+
+        if (categoryResult.rows.length === 0) {
+            // Distinguish "this event sells nothing yet" from "you asked for a
+            // category that isn't this event's" — the frontend renders a
+            // different state for each.
+            const anyCategories = await client.query(
+                'SELECT 1 FROM event_ticket_categories WHERE event_id = $1 LIMIT 1',
                 [eventId]
             );
-            if (parseInt(taken.rows[0].taken, 10) >= event.capacity) {
+            await client.query('ROLLBACK');
+
+            if (anyCategories.rows.length === 0) {
+                return res.status(409).json({
+                    error: 'not_available_for_sale',
+                    message: 'This event has no ticket categories configured yet'
+                });
+            }
+            return res.status(404).json({ error: 'That ticket category is not available for this event' });
+        }
+
+        const category = categoryResult.rows[0];
+
+        // A 0-quantity tier exists but has nothing to sell. Distinct from
+        // unlimited (null), which is the opposite.
+        if (category.ticket_quantity === 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+                error: 'category_sold_out',
+                message: 'This ticket category is sold out'
+            });
+        }
+
+        // Room for THIS ticket's worth of people. Unlimited tiers skip the
+        // check entirely — there is no number to compare against and inventing
+        // a large one would be a lie waiting to overflow.
+        if (category.ticket_quantity !== null) {
+            const peopleSold = await peopleSoldForCategory(client, category.id);
+
+            if (isCategorySoldOut(
+                { admitsCount: category.admits_count, ticketQuantity: category.ticket_quantity },
+                peopleSold
+            )) {
                 await client.query('ROLLBACK');
-                return res.status(409).json({ error: 'This event is sold out' });
+                return res.status(409).json({
+                    error: 'category_sold_out',
+                    message: 'This ticket category is sold out'
+                });
             }
         }
 
@@ -162,9 +224,13 @@ ordersRouter.post('/orders', authenticate, async (req, res) => {
         }
 
         // ── Freeze the price ───────────────────────────────────────────
+        // Sourced from the category, read under the FOR UPDATE above, so the
+        // price frozen here is the one that was current at the moment the seat
+        // was claimed. A later admin edit to that category's price cannot
+        // reach this order — same guarantee as before, new source.
         const gstPercentage = await getGstPercentage();
         const breakdown = calculatePrice(
-            event.price,
+            category.price_paise,
             coupon ? coupon.discount_flat_paise : 0,
             gstPercentage
         );
@@ -181,19 +247,19 @@ ordersRouter.post('/orders', authenticate, async (req, res) => {
 
         const inserted = await client.query(
             `INSERT INTO orders (
-                user_id, event_id, status,
+                user_id, event_id, event_ticket_category_id, status,
                 base_price_paise, coupon_id, discount_paise, subtotal_paise,
                 gst_percentage, gst_paise, total_paise,
                 razorpay_order_id, expires_at
              ) VALUES (
-                $1, $2, 'created',
-                $3, $4, $5, $6,
-                $7, $8, $9,
-                $10, now() + ($11 || ' minutes')::interval
+                $1, $2, $3, 'created',
+                $4, $5, $6, $7,
+                $8, $9, $10,
+                $11, now() + ($12 || ' minutes')::interval
              )
              RETURNING id, expires_at`,
             [
-                userId, eventId,
+                userId, eventId, category.id,
                 breakdown.basePricePaise,
                 coupon ? coupon.id : null,
                 breakdown.discountPaise,

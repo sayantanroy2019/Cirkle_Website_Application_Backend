@@ -165,7 +165,7 @@ describe('The sold-tickets guard', () => {
 
 describe('POST /admin/events — categories at create', () => {
 
-    it('creates a draft event with no categories and no price', async () => {
+    it('creates a draft event with no categories, and surfaces no event-level price', async () => {
         const res = await createEvent(baseEvent({ name: 'EvCat Draft' }));
         expect(res.status).toBe(201);
         createdEventIds.push(res.body.event.id);
@@ -174,8 +174,8 @@ describe('POST /admin/events — categories at create', () => {
         expect(res.body.event.capacitySummary).toEqual({
             totalTickets: 0, totalPeople: 0, hasUnlimited: false
         });
-        // price is vestigial and defaults rather than being required
-        expect(res.body.event.price).toBe(0);
+        // events.price is no longer surfaced at all (Part 4)
+        expect(res.body.event).not.toHaveProperty('price');
     });
 
     it('creates an event with categories and returns them derived', async () => {

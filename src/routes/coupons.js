@@ -11,24 +11,32 @@ const couponsRouter = express.Router();
 // breakdown so the checkout screen can update live. Reserves nothing —
 // the order endpoint re-validates independently.
 couponsRouter.post('/validate', authenticate, async (req, res) => {
-    const { code, eventId } = req.body;
+    const { code, eventId, eventTicketCategoryId } = req.body;
     const userId = req.user.userId;
 
     if (!code || !eventId) {
         return res.status(400).json({ error: 'code and eventId are required' });
     }
+    // The preview has to discount the same base the charge will, and that base
+    // is now per category — without knowing the tier there is no price to
+    // preview against.
+    if (!eventTicketCategoryId) {
+        return res.status(400).json({ error: 'eventTicketCategoryId is required — choose a ticket category first' });
+    }
 
     try {
-        const eventResult = await pool.query(
-            'SELECT id, price FROM events WHERE id = $1',
-            [eventId]
+        // Price comes from the chosen category, scoped to the event so a
+        // category id from another event can't be used to preview a cheaper
+        // tier against this one.
+        const categoryResult = await pool.query(
+            `SELECT price_paise FROM event_ticket_categories
+             WHERE id = $1 AND event_id = $2`,
+            [eventTicketCategoryId, eventId]
         );
 
-        if (eventResult.rows.length === 0) {
-            return res.status(404).json({ error: 'Event not found' });
+        if (categoryResult.rows.length === 0) {
+            return res.status(404).json({ error: 'That ticket category is not available for this event' });
         }
-
-        const event = eventResult.rows[0];
 
         const check = await validateCoupon(code, eventId, userId, pool);
         if (!check.valid) {
@@ -37,7 +45,7 @@ couponsRouter.post('/validate', authenticate, async (req, res) => {
 
         const gstPercentage = await getGstPercentage();
         const breakdown = calculatePrice(
-            event.price,
+            categoryResult.rows[0].price_paise,
             check.coupon.discount_flat_paise,
             gstPercentage
         );

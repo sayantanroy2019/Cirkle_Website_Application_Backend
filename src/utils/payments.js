@@ -59,7 +59,8 @@ export async function confirmOrderPaid(client, {
     paymentMethodDetail = null
 }) {
     const orderResult = await client.query(
-        `SELECT id, user_id, event_id, status, coupon_id, discount_paise
+        `SELECT id, user_id, event_id, event_ticket_category_id,
+                status, coupon_id, discount_paise
          FROM orders
          WHERE razorpay_order_id = $1
          FOR UPDATE`,
@@ -109,11 +110,14 @@ export async function confirmOrderPaid(client, {
 
     let bookingRef;
     try {
+        // The ticket inherits the order's category, so the seat that was held
+        // and the seat that is issued are always the same tier. Carrying it on
+        // both rows is what lets capacity count holds and tickets together.
         const ticket = await client.query(
-            `INSERT INTO tickets (order_id, user_id, event_id)
-             VALUES ($1, $2, $3)
+            `INSERT INTO tickets (order_id, user_id, event_id, event_ticket_category_id)
+             VALUES ($1, $2, $3, $4)
              RETURNING booking_ref`,
-            [order.id, order.user_id, order.event_id]
+            [order.id, order.user_id, order.event_id, order.event_ticket_category_id]
         );
         bookingRef = ticket.rows[0].booking_ref;
     } catch (err) {

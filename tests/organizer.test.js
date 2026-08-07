@@ -22,6 +22,7 @@ let eventAId, eventBId;
 let attendeeUserId, requesterUserId;
 let ticketId, pendingInvitationId, decidedInvitationId;
 let userToken, adminToken, adminId;
+let eventACategoryId, catalogCatId;
 
 beforeAll(async () => {
     const orgAHash = await bcrypt.hash(ORG_A_PASSWORD, 10);
@@ -119,16 +120,29 @@ beforeAll(async () => {
     adminId = adminRow.rows[0].id;
     const adminLogin = await request(app).post('/admin/auth/login').send({ email: 'test-admin-for-org-dash@cirkle.live', password: 'irrelevant-admin-pass' });
     adminToken = adminLogin.body.token;
+
+    // Unlimited tier so the purchase-gate test isn't affected by capacity.
+    const cat = await pool.query("INSERT INTO ticket_categories (name) VALUES ('ZZOrgDash Pass') RETURNING id");
+    catalogCatId = cat.rows[0].id;
+    const etc = await pool.query(
+        `INSERT INTO event_ticket_categories (event_id, category_id, price_paise, admits_count, ticket_quantity)
+         VALUES ($1, $2, 50000, 1, NULL) RETURNING id`,
+        [eventAId, catalogCatId]
+    );
+    eventACategoryId = etc.rows[0].id;
 }, 30000);
 
 afterAll(async () => {
     await pool.query('DELETE FROM event_invitations WHERE id = ANY($1)', [[pendingInvitationId, decidedInvitationId]]);
     await pool.query('DELETE FROM tickets WHERE id = $1', [ticketId]);
     await pool.query('DELETE FROM orders WHERE event_id = ANY($1)', [[eventAId, eventBId]]);
+    // After tickets and orders — both now carry an FK to these rows.
+    await pool.query('DELETE FROM event_ticket_categories WHERE event_id = ANY($1)', [[eventAId, eventBId]]);
     await pool.query('DELETE FROM events WHERE id = ANY($1)', [[eventAId, eventBId]]);
     await pool.query('DELETE FROM users WHERE id = ANY($1)', [[attendeeUserId, requesterUserId]]);
     await pool.query('DELETE FROM organizers WHERE id = ANY($1)', [[orgAId, orgBId]]);
     await pool.query('DELETE FROM admins WHERE id = $1', [adminId]);
+    await pool.query('DELETE FROM ticket_categories WHERE id = $1', [catalogCatId]);
     await pool.end();
 }, 30000);
 
@@ -346,7 +360,7 @@ describe('POST /organizer/invitations/:invitationId/decision', () => {
         const orderRes = await request(app)
             .post('/payments/orders')
             .set('Authorization', `Bearer ${requesterToken}`)
-            .send({ eventId: eventAId });
+            .send({ eventId: eventAId, eventTicketCategoryId: eventACategoryId });
         expect(orderRes.status).toBe(201);
 
         await pool.query('DELETE FROM orders WHERE user_id = $1 AND event_id = $2', [requesterUserId, eventAId]);

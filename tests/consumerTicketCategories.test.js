@@ -57,6 +57,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+    await pool.query('DELETE FROM tickets WHERE event_id = ANY($1)', [[eventId, emptyEventId]]);
+    await pool.query('DELETE FROM orders WHERE event_id = ANY($1)', [[eventId, emptyEventId]]);
     await pool.query('DELETE FROM event_ticket_categories WHERE event_id = ANY($1)', [[eventId, emptyEventId]]);
     await pool.query('DELETE FROM events WHERE id = ANY($1)', [[eventId, emptyEventId]]);
     await pool.query('DELETE FROM ticket_categories WHERE name LIKE $1', [P + '%']);
@@ -246,46 +248,72 @@ describe('GET /events/:id — ticketCategories', () => {
         expect(ev).toHaveProperty('requireFacebook');
         expect(ev).toHaveProperty('requireInstagram');
         expect(ev).toHaveProperty('requireLinkedin');
-        // The vestigial event-level fields stay until Part 4.
-        expect(ev).toHaveProperty('price');
+        // events.price is gone as of Part 4; a tier range replaces it.
+        expect(ev).not.toHaveProperty('price');
+        expect(ev).toHaveProperty('priceRange');
     });
 
 });
 
-// The honest statement of where this feature stands today.
-describe('soldOut is correct but inert against live data', () => {
+// Part 3 left this as a tripwire: it asserted the API reported a sold-out
+// tier as available, because tickets carried no category. Part 4 supplied the
+// link, so it now asserts the live behaviour it was waiting for.
+describe('soldOut is live now that tickets carry their category', () => {
 
-    it('computes all-false from real rows because tickets carry no category yet', async () => {
+    it('flips to sold out once the tier stock is taken', async () => {
         await pool.query('DELETE FROM event_ticket_categories WHERE event_id = $1', [eventId]);
-        await addCategory('Single', 40000, 1, 1);   // a single ticket of stock
+        const single = await addCategory('Single', 40000, 1, 1);   // one ticket of stock
 
-        // Sell a ticket the only way currently possible — with no category link.
+        const before = await getEvent(eventId);
+        expect(before.body.event.ticketCategories[0].available).toBe(true);
+
         const order = await pool.query(
-            `INSERT INTO orders (user_id, event_id, status, base_price_paise, discount_paise,
-                                 subtotal_paise, gst_percentage, gst_paise, total_paise,
-                                 razorpay_order_id, expires_at)
-             VALUES ($1, $2, 'paid', 40000, 0, 40000, 18, 7200, 47200, 'order_consumercat', now() + interval '10 min')
+            `INSERT INTO orders (user_id, event_id, event_ticket_category_id, status,
+                                 base_price_paise, discount_paise, subtotal_paise,
+                                 gst_percentage, gst_paise, total_paise, razorpay_order_id, expires_at)
+             VALUES ($1, $2, $3, 'paid', 40000, 0, 40000, 18, 7200, 47200, 'order_consumercat', now() + interval '10 min')
              RETURNING id`,
-            [userId, eventId]
+            [userId, eventId, single]
         );
         const ticket = await pool.query(
-            'INSERT INTO tickets (order_id, user_id, event_id) VALUES ($1, $2, $3) RETURNING id',
-            [order.rows[0].id, userId, eventId]
+            `INSERT INTO tickets (order_id, user_id, event_id, event_ticket_category_id)
+             VALUES ($1, $2, $3, $4) RETURNING id`,
+            [order.rows[0].id, userId, eventId, single]
         );
 
-        const res = await getEvent(eventId);
-        const single = res.body.event.ticketCategories[0];
-
-        // The stock is one ticket and one has been sold, yet this reads as
-        // available: the ticket is not attributable to a category. Part 4
-        // links them and this flips to soldOut: true with no code change here.
-        expect(single.soldOut).toBe(false);
-        expect(single.available).toBe(true);
-        // Meanwhile the pure function, given the truth, gets it right:
-        expect(isCategorySoldOut({ admitsCount: 1, ticketQuantity: 1 }, 1)).toBe(true);
+        const after = await getEvent(eventId);
+        const tier = after.body.event.ticketCategories[0];
+        expect(tier.soldOut).toBe(true);
+        expect(tier.available).toBe(false);
+        // Sole tier sold out means the event is sold out.
+        expect(after.body.event.soldOut).toBe(true);
 
         await pool.query('DELETE FROM tickets WHERE id = $1', [ticket.rows[0].id]);
         await pool.query('DELETE FROM orders WHERE id = $1', [order.rows[0].id]);
+    });
+
+    it('counts a live hold too, not only issued tickets', async () => {
+        await pool.query('DELETE FROM event_ticket_categories WHERE event_id = $1', [eventId]);
+        const single = await addCategory('Single', 40000, 1, 1);
+
+        const hold = await pool.query(
+            `INSERT INTO orders (user_id, event_id, event_ticket_category_id, status,
+                                 base_price_paise, discount_paise, subtotal_paise,
+                                 gst_percentage, gst_paise, total_paise, razorpay_order_id, expires_at)
+             VALUES ($1, $2, $3, 'created', 40000, 0, 40000, 18, 7200, 47200, 'order_hold_cat', now() + interval '10 min')
+             RETURNING id`,
+            [userId, eventId, single]
+        );
+
+        const res = await getEvent(eventId);
+        expect(res.body.event.ticketCategories[0].soldOut).toBe(true);
+
+        // An EXPIRED hold releases the seat again.
+        await pool.query("UPDATE orders SET expires_at = now() - interval '1 min' WHERE id = $1", [hold.rows[0].id]);
+        const released = await getEvent(eventId);
+        expect(released.body.event.ticketCategories[0].soldOut).toBe(false);
+
+        await pool.query('DELETE FROM orders WHERE id = $1', [hold.rows[0].id]);
     });
 
 });

@@ -185,53 +185,69 @@ describe('GET /admin/events/:id', () => {
 
 describe('PATCH /admin/events/:id — edits and the price-freeze guarantee', () => {
 
-    it('edits the price and records a from/to audit diff', async () => {
-        const res = await request(app)
-            .patch(`/admin/events/${createdEventIds[0]}`)
-            .set('Authorization', `Bearer ${adminToken}`)
-            .send({ price: 60000 });
-        expect(res.status).toBe(200);
-        expect(res.body.event.price).toBe(60000);
-
-        const auditRes = await pool.query(
-            `SELECT changes FROM audit_log
-             WHERE entity_type = 'event' AND entity_id = $1 AND action = 'update'
-             ORDER BY created_at DESC LIMIT 1`,
-            [createdEventIds[0]]
-        );
-        expect(auditRes.rows[0].changes.price).toEqual({ from: 50000, to: 60000 });
-    });
-
-    it('editing price after a ticket is sold does NOT change the frozen order/ticket price', async () => {
-        // Simulate a completed purchase by direct insert (mirrors what
-        // confirmOrderPaid does) — bypasses Razorpay, which isn't under test here.
+    // Price moved onto ticket categories in Part 4, so the guarantee is now
+    // "repricing a CATEGORY doesn't restate orders already placed against it".
+    // Same principle, new source: the order froze what it charged.
+    it('repricing a category does not change an order already frozen against it', async () => {
         const eventId = createdEventIds[0];
+
+        const catalog = await pool.query(
+            "INSERT INTO ticket_categories (name) VALUES ('ZZAdminEvents Freeze') RETURNING id"
+        );
+        const etc = await pool.query(
+            `INSERT INTO event_ticket_categories (event_id, category_id, price_paise, admits_count, ticket_quantity)
+             VALUES ($1, $2, 60000, 1, 10) RETURNING id`,
+            [eventId, catalog.rows[0].id]
+        );
+        const categoryId = etc.rows[0].id;
+
+        // A completed purchase at the then-current 60000, inserted directly —
+        // Razorpay is not under test here.
         const orderRes = await pool.query(
-            `INSERT INTO orders (user_id, event_id, status, base_price_paise, discount_paise,
-                                 subtotal_paise, gst_percentage, gst_paise, total_paise,
+            `INSERT INTO orders (user_id, event_id, event_ticket_category_id, status,
+                                 base_price_paise, discount_paise, subtotal_paise,
+                                 gst_percentage, gst_paise, total_paise,
                                  razorpay_order_id, expires_at)
-             SELECT id, $1, 'paid', 60000, 0, 60000, 18, 10800, 70800,
+             SELECT id, $1, $2, 'paid', 60000, 0, 60000, 18, 10800, 70800,
                     'order_test_freeze_check', now() + interval '10 min'
              FROM users LIMIT 1
-             RETURNING id, total_paise`,
-            [eventId]
+             RETURNING id, base_price_paise, total_paise`,
+            [eventId, categoryId]
         );
-        const orderId = orderRes.rows[0].id;
-        const frozenTotal = orderRes.rows[0].total_paise;
+        const { id: orderId, base_price_paise: frozenBase, total_paise: frozenTotal } = orderRes.rows[0];
 
-        // Admin now edits the event's price
+        // Admin reprices the tier through the API.
         const patchRes = await request(app)
             .patch(`/admin/events/${eventId}`)
             .set('Authorization', `Bearer ${adminToken}`)
-            .send({ price: 999999 });
+            .send({ categories: [{ categoryId: catalog.rows[0].id, pricePaise: 999999, admitsCount: 1, ticketQuantity: 10 }] });
         expect(patchRes.status).toBe(200);
-        expect(patchRes.body.event.price).toBe(999999);
+        expect(patchRes.body.event.categories[0].pricePaise).toBe(999999);
 
-        // The already-placed order's frozen price must be untouched
-        const orderCheck = await pool.query('SELECT total_paise FROM orders WHERE id = $1', [orderId]);
-        expect(orderCheck.rows[0].total_paise).toBe(frozenTotal);
+        // The placed order is untouched.
+        const check = await pool.query('SELECT base_price_paise, total_paise FROM orders WHERE id = $1', [orderId]);
+        expect(check.rows[0].base_price_paise).toBe(frozenBase);
+        expect(check.rows[0].total_paise).toBe(frozenTotal);
 
         await pool.query('DELETE FROM orders WHERE id = $1', [orderId]);
+        await pool.query('DELETE FROM event_ticket_categories WHERE id = $1', [categoryId]);
+        await pool.query('DELETE FROM ticket_categories WHERE id = $1', [catalog.rows[0].id]);
+    });
+
+    it('no longer accepts or returns an event-level price or capacity', async () => {
+        const res = await request(app)
+            .patch(`/admin/events/${createdEventIds[0]}`)
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ venueName: 'Post-Part-4 Venue', price: 60000, capacity: 5 });
+        expect(res.status).toBe(200);
+
+        // Ignored, not rejected — an un-updated client still works.
+        expect(res.body.event).not.toHaveProperty('price');
+        expect(res.body.event).not.toHaveProperty('capacity');
+        expect(res.body.event.venueName).toBe('Post-Part-4 Venue');
+
+        const stored = await pool.query('SELECT price, capacity FROM events WHERE id = $1', [createdEventIds[0]]);
+        expect(stored.rows[0].price).not.toBe(60000);   // the column was not written
     });
 
     it('rejects a startsAt in the past when startsAt IS being changed', async () => {

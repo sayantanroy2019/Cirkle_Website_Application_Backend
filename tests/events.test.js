@@ -139,7 +139,7 @@ describe('GET /events/:id', () => {
         expect(res.body.event).toBeDefined();
         expect(res.body.event.id).toBe(eventId);
         expect(res.body.event.name).toBeDefined();
-        expect(res.body.event.price).toBeDefined();
+        expect(res.body.event).toHaveProperty('priceRange');   // events.price is gone (Part 4)
         expect(res.body.event.targetGroupSize).toBeDefined();
     });
 

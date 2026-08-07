@@ -19,6 +19,8 @@ const ADMIN_EMAIL = 'test-admin-social@cirkle.live';
 const ADMIN_PASSWORD = 'AdminSocialPass123!';
 
 let userId, userToken, fillerUserId, orgId, orgToken, adminId, adminToken;
+// Unlimited tiers, so capacity never interferes with a gate test.
+let openCategoryId, inviteCategoryId, catalogCategoryId;
 let openEventId, inviteEventId;
 
 const patchProfile = body =>
@@ -109,16 +111,31 @@ beforeAll(async () => {
         [orgId]
     );
     inviteEventId = inviteEvent.rows[0].id;
+
+    const cat = await pool.query(
+        "INSERT INTO ticket_categories (name) VALUES ('ZZSocialGate Pass') RETURNING id"
+    );
+    catalogCategoryId = cat.rows[0].id;
+    const mkCat = async eventId => (await pool.query(
+        `INSERT INTO event_ticket_categories (event_id, category_id, price_paise, admits_count, ticket_quantity)
+         VALUES ($1, $2, 50000, 1, NULL) RETURNING id`,
+        [eventId, catalogCategoryId]
+    )).rows[0].id;
+    openCategoryId = await mkCat(openEventId);
+    inviteCategoryId = await mkCat(inviteEventId);
 });
 
 afterAll(async () => {
     await pool.query('DELETE FROM event_invitations WHERE event_id = ANY($1)', [[openEventId, inviteEventId]]);
     await pool.query('DELETE FROM orders WHERE event_id = ANY($1)', [[openEventId, inviteEventId]]);
     await pool.query('DELETE FROM tickets WHERE event_id = ANY($1)', [[openEventId, inviteEventId]]);
+    // After tickets and orders — both now carry an FK to these rows.
+    await pool.query('DELETE FROM event_ticket_categories WHERE event_id = ANY($1)', [[openEventId, inviteEventId]]);
     await pool.query('DELETE FROM audit_log WHERE entity_type = $1 AND entity_id = ANY($2)', ['event', [openEventId, inviteEventId]]);
     await pool.query('DELETE FROM events WHERE id = ANY($1)', [[openEventId, inviteEventId]]);
     await pool.query('DELETE FROM organizers WHERE id = $1', [orgId]);
     await pool.query('DELETE FROM admins WHERE id = $1', [adminId]);
+    await pool.query('DELETE FROM ticket_categories WHERE id = $1', [catalogCategoryId]);
     await pool.query('DELETE FROM profiles WHERE user_id = $1', [userId]);
     await pool.query('DELETE FROM users WHERE id = ANY($1)', [[userId, fillerUserId]]);
     await pool.end();
@@ -238,7 +255,7 @@ describe('The gate — open event purchase', () => {
         const res = await request(app)
             .post('/payments/orders')
             .set('Authorization', `Bearer ${userToken}`)
-            .send({ eventId: openEventId });
+            .send({ eventId: openEventId, eventTicketCategoryId: openCategoryId });
 
         expect(res.status).toBe(403);
         expect(res.body.error).toBe('social_handles_required');
@@ -251,7 +268,7 @@ describe('The gate — open event purchase', () => {
         const res = await request(app)
             .post('/payments/orders')
             .set('Authorization', `Bearer ${userToken}`)
-            .send({ eventId: openEventId });
+            .send({ eventId: openEventId, eventTicketCategoryId: openCategoryId });
 
         expect(res.status).toBe(403);
         expect(res.body.missing).toEqual(['linkedin']);
@@ -268,7 +285,7 @@ describe('The gate — open event purchase', () => {
         const res = await request(app)
             .post('/payments/orders')
             .set('Authorization', `Bearer ${userToken}`)
-            .send({ eventId: openEventId });
+            .send({ eventId: openEventId, eventTicketCategoryId: openCategoryId });
 
         expect(res.status).toBe(403);
         expect(res.body.error).toBe('social_handles_required');
@@ -283,7 +300,7 @@ describe('The gate — open event purchase', () => {
         const res = await request(app)
             .post('/payments/orders')
             .set('Authorization', `Bearer ${userToken}`)
-            .send({ eventId: openEventId });
+            .send({ eventId: openEventId, eventTicketCategoryId: openCategoryId });
 
         // Past the gate. Anything other than the handle 403 proves it — the
         // order may still fail downstream on Razorpay config in CI.
@@ -298,7 +315,7 @@ describe('The gate — open event purchase', () => {
         const res = await request(app)
             .post('/payments/orders')
             .set('Authorization', `Bearer ${userToken}`)
-            .send({ eventId: openEventId });
+            .send({ eventId: openEventId, eventTicketCategoryId: openCategoryId });
 
         expect(res.body.error).not.toBe('social_handles_required');
     });

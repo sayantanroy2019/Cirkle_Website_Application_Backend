@@ -10,6 +10,7 @@ let token;
 let userId;
 let inviteOnlyEventId;
 let openEventId;
+let inviteCategoryId, catalogCatId;
 
 beforeAll(async () => {
     // A user, onboarded far enough to have a city (needed by some event reads)
@@ -33,14 +34,26 @@ beforeAll(async () => {
          RETURNING id`
     );
     openEventId = open.rows[0].id;
+
+    // Unlimited tier so these gate tests never hit capacity.
+    const cat = await pool.query("INSERT INTO ticket_categories (name) VALUES ('ZZInviteGate Pass') RETURNING id");
+    catalogCatId = cat.rows[0].id;
+    const etc = await pool.query(
+        `INSERT INTO event_ticket_categories (event_id, category_id, price_paise, admits_count, ticket_quantity)
+         VALUES ($1, $2, 50000, 1, NULL) RETURNING id`,
+        [inviteOnlyEventId, catalogCatId]
+    );
+    inviteCategoryId = etc.rows[0].id;
 });
 
 afterAll(async () => {
     // Order matters: invitations and orders reference events/users
     await pool.query('DELETE FROM event_invitations WHERE user_id = $1', [userId]);
     await pool.query('DELETE FROM orders WHERE user_id = $1', [userId]);
+    await pool.query('DELETE FROM event_ticket_categories WHERE event_id = ANY($1)', [[inviteOnlyEventId, openEventId]]);
     await pool.query('DELETE FROM events WHERE id = ANY($1)', [[inviteOnlyEventId, openEventId]]);
     await pool.query('DELETE FROM users WHERE phone = $1', [TEST_PHONE]);
+    await pool.query('DELETE FROM ticket_categories WHERE id = $1', [catalogCatId]);
     await pool.end();
 });
 
@@ -109,7 +122,7 @@ describe('POST /payments/orders — the invite-only gate', () => {
         const res = await request(app)
             .post('/payments/orders')
             .set('Authorization', `Bearer ${token}`)
-            .send({ eventId: inviteOnlyEventId });
+            .send({ eventId: inviteOnlyEventId, eventTicketCategoryId: inviteCategoryId });
         expect(res.status).toBe(403);
         expect(res.body.error).toMatch(/accepted invitation is required/i);
     });
@@ -124,7 +137,7 @@ describe('POST /payments/orders — the invite-only gate', () => {
         const res = await request(app)
             .post('/payments/orders')
             .set('Authorization', `Bearer ${token}`)
-            .send({ eventId: inviteOnlyEventId });
+            .send({ eventId: inviteOnlyEventId, eventTicketCategoryId: inviteCategoryId });
         expect(res.status).toBe(403);
     });
 
@@ -139,7 +152,7 @@ describe('POST /payments/orders — the invite-only gate', () => {
         const res = await request(app)
             .post('/payments/orders')
             .set('Authorization', `Bearer ${token}`)
-            .send({ eventId: inviteOnlyEventId });
+            .send({ eventId: inviteOnlyEventId, eventTicketCategoryId: inviteCategoryId });
         expect(res.status).toBe(201);
         expect(res.body.razorpayOrderId).toMatch(/^order_/);
     });

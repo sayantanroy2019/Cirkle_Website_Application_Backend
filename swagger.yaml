@@ -2057,6 +2057,53 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /admin/revenue/by-category:
+    get:
+      tags: [Admin — Revenue]
+      summary: Revenue broken down by ticket category
+      description: |
+        Which tier actually sells. Same money rules as the other revenue views: computed only from `status='paid'` orders, refunds surfaced separately rather than netted.
+
+        Money comes from the FROZEN order columns, never from the category's current `price_paise` — repricing a tier must not restate history. `currentPricePaise` is included for context and is deliberately not what the revenue figures are built from.
+
+        `peopleAdmitted` is ticketsSold × admitsCount — the number that matters at the door, and the reason a Couple tier's revenue and headcount differ by a factor of two.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: eventId
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Restrict to one event's tiers. Omit for every category across every event.
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, default: 50, maximum: 100 }
+        - in: query
+          name: offset
+          required: false
+          schema: { type: integer, default: 0 }
+      responses:
+        '200':
+          description: Per-category revenue
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CategoryRevenue'
+                  total: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /admin/revenue/by-event:
     get:
       tags: [Admin — Revenue]
@@ -3651,6 +3698,47 @@ components:
             Inventory in tickets. null (or omitted) means unlimited; 0 means
             the tier exists with nothing to sell.
           example: 50
+
+    CategoryRevenue:
+      type: object
+      description: One ticket category's sales. Money from frozen order columns; refunds separate, never netted.
+      properties:
+        eventTicketCategoryId: { type: string, format: uuid }
+        eventId: { type: string, format: uuid }
+        eventName: { type: string }
+        categoryName: { type: string, example: Couple Pass }
+        admitsCount: { type: integer, example: 2 }
+        currentPricePaise:
+          type: integer
+          description: The tier's price today — context only. Revenue is computed from what was actually charged.
+        ticketsSold: { type: integer }
+        peopleAdmitted:
+          type: integer
+          description: ticketsSold × admitsCount
+        grossPaise: { type: integer }
+        discountsPaise: { type: integer }
+        netBeforeGstPaise: { type: integer }
+        gstCollectedPaise: { type: integer }
+        totalCollectedPaise: { type: integer }
+        paidOrderCount: { type: integer }
+        refundedPaise:
+          type: integer
+          description: Shown separately, never netted against collections.
+
+    PriceRange:
+      type: object
+      nullable: true
+      description: >-
+        Cheapest and dearest tier, for a "from ₹400" card. null when the event
+        has no categories — there is no price to quote. Replaces the removed
+        event-level price field.
+      properties:
+        minPaise:
+          type: integer
+          example: 40000
+        maxPaise:
+          type: integer
+          example: 150000
 
     CapacitySummary:
       type: object

@@ -17,7 +17,9 @@ import {
     ticketsSoldByCategory,
     replaceEventCategories,
     fetchEventCategories,
-    buildCapacitySummary
+    buildCapacitySummary,
+    categorySummariesForEvents,
+    priceRange
 } from '../utils/eventCategories.js';
 
 const adminEventsRouter = express.Router();
@@ -229,7 +231,8 @@ adminEventsRouter.post('/', async (req, res) => {
             event: {
                 ...toResponse(event),
                 categories: saved,
-                capacitySummary: buildCapacitySummary(saved)
+                capacitySummary: buildCapacitySummary(saved),
+                priceRange: priceRange(saved)
             }
         });
 
@@ -283,9 +286,16 @@ adminEventsRouter.get('/', async (req, res) => {
         const bannerKeys = result.rows.map(r => r.banner_s3_key).filter(Boolean);
         const viewUrls = await getPhotoViewUrls(bannerKeys);
 
+        // One aggregate query for the whole page, not one per event. Uses the
+        // same derivation as the detail endpoint, so a given event's numbers
+        // are identical in both — the list cannot drift from the detail.
+        const summaries = await categorySummariesForEvents(result.rows.map(r => r.id));
+
         res.json({
             events: result.rows.map(row => ({
                 ...toResponse(row),
+                capacitySummary: summaries[row.id].capacitySummary,
+                priceRange:      summaries[row.id].priceRange,
                 bannerUrl:     row.banner_s3_key ? viewUrls[row.banner_s3_key] : null,
                 organizerName: row.organizer_name ?? null
             }))
@@ -332,6 +342,7 @@ adminEventsRouter.get('/:id', async (req, res) => {
                 ...toResponse(row),
                 categories,
                 capacitySummary: buildCapacitySummary(categories),
+                priceRange: priceRange(categories),
                 bannerUrl: row.banner_s3_key ? viewUrls[row.banner_s3_key] : null,
                 // s3Key is exposed here (admin only) because PUT /gallery is a
                 // full replace — to keep an existing photo the admin has to
@@ -518,7 +529,8 @@ adminEventsRouter.patch('/:id', async (req, res) => {
             event: {
                 ...toResponse(after),
                 categories: savedCategories,
-                capacitySummary: buildCapacitySummary(savedCategories)
+                capacitySummary: buildCapacitySummary(savedCategories),
+                priceRange: priceRange(savedCategories)
             }
         });
 

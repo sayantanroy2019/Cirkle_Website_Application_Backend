@@ -7,6 +7,15 @@ const adminOrdersRouter = express.Router();
 
 const ALLOWED_STATUSES = ['created', 'paid', 'failed', 'expired', 'refunded'];
 
+// 'YYYY-MM-DD' with no time component — the form that means "a whole day".
+const BARE_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+// Rejects junk before it reaches Postgres, where a bad cast would surface as
+// a 500 rather than a 400.
+function isValidDateInput(value) {
+    return typeof value === 'string' && !Number.isNaN(new Date(value).getTime());
+}
+
 // Read-only oversight — both admin roles, no capability gate.
 adminOrdersRouter.use(authenticateAdmin);
 
@@ -59,8 +68,42 @@ adminOrdersRouter.get('/', async (req, res) => {
     if (status !== undefined)  { conditions.push(`o.status = $${p++}`);       values.push(status); }
     if (eventId !== undefined) { conditions.push(`o.event_id = $${p++}`);     values.push(eventId); }
     if (userId !== undefined)  { conditions.push(`o.user_id = $${p++}`);      values.push(userId); }
-    if (from !== undefined)    { conditions.push(`o.created_at >= $${p++}`);  values.push(from); }
-    if (to !== undefined)      { conditions.push(`o.created_at <= $${p++}`);  values.push(to); }
+    // Date bounds.
+    //
+    // A bare date means the whole of that DAY, in UTC. created_at is
+    // timestamptz and the DB session runs in UTC, so 'YYYY-MM-DD' casts to
+    // midnight UTC — `from` is already start-of-day inclusive and needs no
+    // special handling.
+    //
+    // `to` did need it: compared directly, a bare 'to' meant midnight at the
+    // START of that day, so everything created during the day fell outside
+    // the bound and from=X&to=X returned nothing. Swagger documented `to` as
+    // inclusive, so this was a contract violation, not a quirk.
+    //
+    // The fix is half-open — created_at < to + 1 day — which is exact for
+    // timestamps of any precision, unlike comparing against 23:59:59.999.
+    //
+    // A `to` carrying an explicit time is honoured as given: callers wanting
+    // an IST business day (as the admin portal already sends) pass full UTC
+    // instants and are unaffected.
+    if (from !== undefined) {
+        if (!isValidDateInput(from)) {
+            return res.status(400).json({ error: 'from must be YYYY-MM-DD or an ISO 8601 timestamp' });
+        }
+        conditions.push(`o.created_at >= $${p++}`);
+        values.push(from);
+    }
+    if (to !== undefined) {
+        if (!isValidDateInput(to)) {
+            return res.status(400).json({ error: 'to must be YYYY-MM-DD or an ISO 8601 timestamp' });
+        }
+        if (BARE_DATE.test(to)) {
+            conditions.push(`o.created_at < ($${p++}::date + interval '1 day')`);
+        } else {
+            conditions.push(`o.created_at <= $${p++}`);
+        }
+        values.push(to);
+    }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 

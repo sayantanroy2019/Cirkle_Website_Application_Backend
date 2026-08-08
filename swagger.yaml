@@ -1262,7 +1262,12 @@ paths:
     get:
       tags: [Admin — Events]
       summary: List all events
-      description: List view includes a presigned bannerUrl (batch-signed) but not the gallery — that's detail-only.
+      description: |
+        List view includes a presigned bannerUrl (batch-signed) but not the gallery — that's detail-only.
+
+        Each row carries `capacitySummary` and `priceRange`, derived from that event's ticket categories, so the list can show capacity and a "₹500–₹900" range without opening every event. They use the SAME derivation as GET /admin/events/{id}, so list and detail cannot disagree, and are computed in one aggregate query for the whole page rather than one per event.
+
+        A category-less event returns zeroed sums with `hasUnlimited: false` and `priceRange: null` — distinct from sold out, and what the frontend renders "no categories yet" from.
       security: [{ bearerAuth: [] }]
       parameters:
         - in: query
@@ -1900,7 +1905,14 @@ paths:
     get:
       tags: [Admin — Orders]
       summary: List orders
-      description: Filterable and combinable. Includes the full frozen price breakdown plus light event/user context for support lookup.
+      description: |
+        Filterable and combinable. Includes the full frozen price breakdown plus light event/user context for support lookup.
+
+        **Date filtering.** `from` and `to` are both INCLUSIVE and are matched against `created_at`.
+
+        A bare date (`YYYY-MM-DD`) means that whole day **in UTC** — `created_at` is timestamptz and the database session runs in UTC. So `from=2026-07-28&to=2026-07-28` returns everything created on the 28th UTC. (Internally `to` is applied as `created_at < to + 1 day`, which is exact at any timestamp precision.)
+
+        A value carrying an explicit time component is honoured exactly as given and is NOT widened to end-of-day. Callers wanting an IST business day should send full UTC instants for its boundaries — which is what the admin portal already does, and it continues to work unchanged.
       security: [{ bearerAuth: [] }]
       parameters:
         - in: query
@@ -3896,6 +3908,8 @@ components:
             $ref: '#/components/schemas/EventTicketCategory'
         capacitySummary:
           $ref: '#/components/schemas/CapacitySummary'
+        priceRange:
+          $ref: '#/components/schemas/PriceRange'
         requireFacebook:
           type: boolean
           description: >-

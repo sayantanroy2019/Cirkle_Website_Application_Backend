@@ -2,6 +2,7 @@ import express from 'express';
 import { pool } from '../config/db.js';
 import authenticateAdmin from '../middlewares/authenticateAdmin.js';
 import { parsePagination, paginatedResponse } from '../utils/pagination.js';
+import { userContactFor } from '../utils/adminPii.js';
 
 const adminOrdersRouter = express.Router();
 
@@ -19,7 +20,7 @@ function isValidDateInput(value) {
 // Read-only oversight — both admin roles, no capability gate.
 adminOrdersRouter.use(authenticateAdmin);
 
-function toResponse(row) {
+function toResponse(row, admin) {
     return {
         id:     row.id,
         status: row.status,
@@ -40,13 +41,13 @@ function toResponse(row) {
             id:   row.event_id,
             name: row.event_name
         },
-        // PII: phone is included here for support lookup, per spec. See the
-        // note in adminUsers.js — this is a deliberate, un-masked exposure
-        // for now; a future view_pii capability will gate this server-side.
+        // PII: phone is included for support lookup, and is role-gated —
+        // real for an administrative admin, masked for business_development.
+        // userContactFor() is the single decision point; see utils/adminPii.js.
         user: {
             id:        row.user_id,
             firstName: row.user_first_name,
-            phone:     row.user_phone
+            ...userContactFor(admin, { phone: row.user_phone })
         }
     };
 }
@@ -122,7 +123,7 @@ adminOrdersRouter.get('/', async (req, res) => {
             [...values, limit, offset]
         );
 
-        res.json(paginatedResponse(dataResult.rows.map(toResponse), countResult.rows[0].count, limit, offset));
+        res.json(paginatedResponse(dataResult.rows.map(r => toResponse(r, req.admin)), countResult.rows[0].count, limit, offset));
 
     } catch (err) {
         console.error('GET /admin/orders error:', err.message);
@@ -178,7 +179,7 @@ adminOrdersRouter.get('/:id', async (req, res) => {
             checkedIn:  t.rows[0].checked_in_at !== null
         } : null;
 
-        res.json({ order: { ...toResponse(row), coupon, ticket } });
+        res.json({ order: { ...toResponse(row, req.admin), coupon, ticket } });
 
     } catch (err) {
         console.error('GET /admin/orders/:id error:', err.message);

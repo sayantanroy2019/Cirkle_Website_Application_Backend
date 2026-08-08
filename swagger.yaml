@@ -65,7 +65,10 @@ tags:
   - name: Admin — Invitations
     description: Global read-only view of all invitation activity across every organizer. Both admin roles.
   - name: Admin — Users
-    description: Read-only user oversight and the support-lookup screen. Both admin roles. Phone and email are unmasked PII for now — see the Admin — Users schema notes.
+    description: |
+      Read-only user oversight and the support-lookup screen. Both admin roles.
+
+      End-user phone and email are masked for business_development admins and shown in full to administrative admins — see the endpoint descriptions.
   - name: Admin — Ticket Categories
     description: |
       The global catalogue of ticket category NAMES ("Single Pass", "Couple Pass", "Group of 4") — admin-managed reference data, like cities. Both admin roles.
@@ -1010,6 +1013,16 @@ paths:
                 displayName:
                   type: string
                   description: Business name shown in the organizer dashboard
+                instagram:
+                  type: string
+                  nullable: true
+                  description: >-
+                    Public Instagram handle, shown as an icon link on the
+                    consumer event-detail page. Optional. Accepts a bare
+                    handle, @handle, or a full profile URL — normalized to the
+                    bare handle on write. Send '' or null to clear it. An
+                    unparseable value returns 400.
+                  example: kittysu
       responses:
         '201':
           description: Organizer created
@@ -1124,6 +1137,15 @@ paths:
                   type: string
                   minLength: 8
                   description: Optional — resets the organizer's password when present
+                instagram:
+                  type: string
+                  nullable: true
+                  description: >-
+                    Public Instagram handle. Accepts a bare handle, @handle, or
+                    a full profile URL — normalized to the bare handle on
+                    write. Send '' or null to clear it; omit to leave it
+                    unchanged. An unparseable value returns 400.
+                  example: kittysu
       responses:
         '200':
           description: Organizer updated
@@ -1527,8 +1549,15 @@ paths:
   /admin/events/{id}/banner:
     patch:
       tags: [Admin — Events]
-      summary: Set the event banner
-      description: Verifies the object exists in S3 (HeadObject) before saving — the client claiming an upload happened isn't trusted. Writes an audit_log row with the from/to key.
+      summary: Set, replace or clear the event banner
+      description: |
+        Verifies the object exists in S3 (HeadObject) before saving — the client claiming an upload happened isn't trusted. Writes an audit_log row with the from/to key.
+
+        **Clearing.** Send `s3Key: null` (or an empty string) to remove the banner. Responses then report `bannerUrl: null` and the frontend's placeholder handles the empty state. This matches how the other image endpoints clear: the gallery with `photos: []`, an artist photo with `s3Key: null`.
+
+        Omitting `s3Key` entirely is still a 400 — only an EXPLICIT null means "remove", so a malformed body cannot silently wipe a banner.
+
+        Clearing nulls the reference only; the S3 object is left in place. This IAM identity has no s3:DeleteObject permission, and orphaned objects are a separate storage-cleanup concern.
       security: [{ bearerAuth: [] }]
       parameters:
         - in: path
@@ -1547,10 +1576,14 @@ paths:
               properties:
                 s3Key:
                   type: string
-                  description: The key returned by POST .../image-url, after the file has been PUT to S3
+                  nullable: true
+                  description: >-
+                    The key returned by POST .../image-url, after the file has
+                    been PUT to S3 — or null (or an empty string) to clear the
+                    banner. The field must be present either way.
       responses:
         '200':
-          description: Banner set
+          description: Banner set, replaced, or cleared
           content:
             application/json:
               schema:
@@ -1558,9 +1591,10 @@ paths:
                 properties:
                   bannerUrl:
                     type: string
-                    description: Presigned view URL for the new banner
+                    nullable: true
+                    description: Presigned view URL for the new banner, or null if it was cleared
         '400':
-          description: Missing s3Key, or the image was not found in S3
+          description: s3Key absent from the body, or the image was not found in S3
           content:
             application/json:
               schema:
@@ -1906,6 +1940,9 @@ paths:
       tags: [Admin — Orders]
       summary: List orders
       description: |
+        **PII masking by role.** End-user `phone` and `email` are role-gated. An `administrative` admin holds `view_pii` and receives the real values; a `business_development` admin receives MASKED ones — phone as `+91******210` (country code plus last three digits), email as `j****@gmail.com` (first character plus the domain, which is kept for context).
+
+        Masking is applied server-side, so the real value never enters the response body for a BD admin and cannot be recovered from the network tab. There is no reveal endpoint or query flag.
         Filterable and combinable. Includes the full frozen price breakdown plus light event/user context for support lookup.
 
         **Date filtering.** `from` and `to` are both INCLUSIVE and are matched against `created_at`.
@@ -1978,7 +2015,10 @@ paths:
     get:
       tags: [Admin — Orders]
       summary: Get full order detail
-      description: Everything from the list view plus the coupon used (if any) and the linked ticket (if the order is paid).
+      description: |
+        Everything from the list view plus the coupon used (if any) and the linked ticket (if the order is paid).
+
+        **PII masking by role.** End-user `phone` and `email` are role-gated: `administrative` admins hold `view_pii` and see real values, `business_development` admins receive masked ones (`+91******210`, `j****@gmail.com`). Masking is server-side, so the real value never enters the response body.
       security: [{ bearerAuth: [] }]
       parameters:
         - in: path
@@ -2037,7 +2077,12 @@ paths:
     get:
       tags: [Admin — Tickets]
       summary: List tickets
-      description: Filtered by eventId alone, this is effectively the venue guest list for that event.
+      description: |
+        Filtered by eventId alone, this is effectively the venue guest list for that event.
+
+        **PII masking by role.** End-user `phone` and `email` are role-gated. An `administrative` admin holds `view_pii` and receives the real values; a `business_development` admin receives MASKED ones — phone as `+91******210` (country code plus last three digits), email as `j****@gmail.com` (first character plus the domain, which is kept for context).
+
+        Masking is applied server-side, so the real value never enters the response body for a BD admin and cannot be recovered from the network tab. There is no reveal endpoint or query flag.
       security: [{ bearerAuth: [] }]
       parameters:
         - in: query
@@ -2089,7 +2134,10 @@ paths:
     get:
       tags: [Admin — Tickets]
       summary: Get ticket detail
-      description: Everything from the list view plus which order it came from and the price paid.
+      description: |
+        Everything from the list view plus which order it came from and the price paid.
+
+        **PII masking by role.** End-user `phone` and `email` are role-gated: `administrative` admins hold `view_pii` and see real values, `business_development` admins receive masked ones (`+91******210`, `j****@gmail.com`). Masking is server-side, so the real value never enters the response body.
       security: [{ bearerAuth: [] }]
       parameters:
         - in: path
@@ -2232,7 +2280,10 @@ paths:
     get:
       tags: [Admin — Invitations]
       summary: List invitation activity across every organizer
-      description: The global view. The organizer dashboard will later show a scoped (own-events-only) version of this.
+      description: |
+        The global view. The organizer dashboard will later show a scoped (own-events-only) version of this.
+
+        **PII masking by role.** End-user `phone` and `email` are role-gated: `administrative` admins hold `view_pii` and see real values, `business_development` admins receive masked ones (`+91******210`, `j****@gmail.com`). Masking is server-side, so the real value never enters the response body.
       security: [{ bearerAuth: [] }]
       parameters:
         - in: query
@@ -2284,6 +2335,13 @@ paths:
     get:
       tags: [Admin — Users]
       summary: Search and list users
+      description: |
+        Search matches phone, email and first/last name — case-insensitive partial.
+        **PII masking by role.** End-user `phone` and `email` are role-gated. An `administrative` admin holds `view_pii` and receives the real values; a `business_development` admin receives MASKED ones — phone as `+91******210` (country code plus last three digits), email as `j****@gmail.com` (first character plus the domain, which is kept for context).
+
+        Masking is applied server-side, so the real value never enters the response body for a BD admin and cannot be recovered from the network tab. There is no reveal endpoint or query flag.
+
+        Search matches the REAL stored values, so a BD admin can still find a user by phone or email; the results come back masked.
       security: [{ bearerAuth: [] }]
       parameters:
         - in: query
@@ -2317,7 +2375,10 @@ paths:
     get:
       tags: [Admin — Users]
       summary: Full user detail — the support-lookup screen
-      description: Complete profile (presigned photo URLs, lifestyle tags, bio, tagline), phone, email, derived age, plus full order and ticket history.
+      description: |
+        Complete profile (presigned photo URLs, lifestyle tags, bio, tagline), phone, email, derived age, plus full order and ticket history.
+
+        **PII masking by role.** End-user `phone` and `email` are role-gated: `administrative` admins hold `view_pii` and see real values, `business_development` admins receive masked ones (`+91******210`, `j****@gmail.com`). Masking is server-side, so the real value never enters the response body.
       security: [{ bearerAuth: [] }]
       parameters:
         - in: path

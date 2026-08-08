@@ -30,10 +30,28 @@ organizerEventsRouter.get('/', async (req, res) => {
         const countResult = await pool.query('SELECT COUNT(*) FROM events WHERE organizer_id = $1', [organizerId]);
 
         const dataResult = await pool.query(
+            // "What's coming up", not "what's furthest away". Upcoming events
+            // first, soonest at the top; past events below, most recent first,
+            // so a just-finished event is the first of the past group rather
+            // than an ancient one.
+            //
+            // Past events are ordered, not filtered — an organizer still needs
+            // a finished event to pull its attendee list.
+            //
+            // The boundary is starts_at >= now() counts as upcoming, so an
+            // event starting this instant is still "coming up".
+            //
+            // e.id is the unique tiebreaker: without it, two events at the
+            // same starts_at could order differently between pages and
+            // LIMIT/OFFSET would skip or repeat rows.
             `SELECT e.*, (SELECT COUNT(*) FROM tickets t WHERE t.event_id = e.id) AS tickets_sold
              FROM events e
              WHERE e.organizer_id = $1
-             ORDER BY e.starts_at DESC, e.id DESC
+             ORDER BY
+                (e.starts_at < now()) ASC,
+                CASE WHEN e.starts_at >= now() THEN e.starts_at END ASC  NULLS LAST,
+                CASE WHEN e.starts_at <  now() THEN e.starts_at END DESC NULLS LAST,
+                e.id ASC
              LIMIT $2 OFFSET $3`,
             [organizerId, limit, offset]
         );

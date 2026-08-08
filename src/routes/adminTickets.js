@@ -2,13 +2,14 @@ import express from 'express';
 import { pool } from '../config/db.js';
 import authenticateAdmin from '../middlewares/authenticateAdmin.js';
 import { parsePagination, paginatedResponse } from '../utils/pagination.js';
+import { userContactFor } from '../utils/adminPii.js';
 
 const adminTicketsRouter = express.Router();
 
 // Read-only oversight — both admin roles, no capability gate.
 adminTicketsRouter.use(authenticateAdmin);
 
-function toResponse(row) {
+function toResponse(row, admin) {
     return {
         id:          row.id,
         bookingRef:  row.booking_ref,
@@ -20,12 +21,12 @@ function toResponse(row) {
             name:    row.event_name,
             startsAt: row.event_starts_at
         },
-        // PII: phone included for support lookup — see the PII note in
-        // adminUsers.js. Deliberate, un-masked for now.
+        // PII: phone included for support lookup, role-gated via
+        // userContactFor() — real for administrative, masked for BD.
         user: {
             id:        row.user_id,
             firstName: row.user_first_name,
-            phone:     row.user_phone
+            ...userContactFor(admin, { phone: row.user_phone })
         }
     };
 }
@@ -68,7 +69,7 @@ adminTicketsRouter.get('/', async (req, res) => {
             [...values, limit, offset]
         );
 
-        res.json(paginatedResponse(dataResult.rows.map(toResponse), countResult.rows[0].count, limit, offset));
+        res.json(paginatedResponse(dataResult.rows.map(r => toResponse(r, req.admin)), countResult.rows[0].count, limit, offset));
 
     } catch (err) {
         console.error('GET /admin/tickets error:', err.message);
@@ -103,7 +104,7 @@ adminTicketsRouter.get('/:id', async (req, res) => {
 
         res.json({
             ticket: {
-                ...toResponse(row),
+                ...toResponse(row, req.admin),
                 order: {
                     id:           row.order_id,
                     pricePaidPaise: row.price_paid_paise

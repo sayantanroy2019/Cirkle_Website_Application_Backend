@@ -240,6 +240,91 @@ describe('Ownership — requesting another organizer\'s data returns 404, never 
 
 });
 
+// B8 — the dashboard is "what's coming up", not "what's furthest away".
+describe('GET /organizer/events — ordering', () => {
+
+    const seededIds = [];
+
+    beforeAll(async () => {
+        // Inserted deliberately out of order, so a passing assertion cannot be
+        // an accident of insertion sequence.
+        const mk = async (name, interval) => {
+            const r = await pool.query(
+                `INSERT INTO events (name, category_id, city_id, starts_at, price, target_group_size, organizer_id)
+                 VALUES ($1, 'club', 'del', now() + $2::interval, 0, 2, $3) RETURNING id`,
+                [name, interval, orgAId]
+            );
+            seededIds.push(r.rows[0].id);
+        };
+
+        await mk('ZZOrder Far Future', '60 days');
+        await mk('ZZOrder Long Past',  '-90 days');
+        await mk('ZZOrder Soonest',    '2 days');
+        await mk('ZZOrder Just Ended', '-1 days');
+        await mk('ZZOrder Mid Future', '10 days');
+    });
+
+    afterAll(async () => {
+        await pool.query('DELETE FROM events WHERE id = ANY($1)', [seededIds]);
+    });
+
+    const fetchAll = () => request(app)
+        .get('/organizer/events?limit=100')
+        .set('Authorization', `Bearer ${orgAToken}`);
+
+    it('puts upcoming first (soonest first), then past (most recent first)', async () => {
+        const res = await fetchAll();
+        expect(res.status).toBe(200);
+
+        const mine = res.body.data
+            .filter(e => e.name.startsWith('ZZOrder '))
+            .map(e => e.name);
+
+        expect(mine).toEqual([
+            'ZZOrder Soonest',      // +2d  — upcoming, soonest at the top
+            'ZZOrder Mid Future',   // +10d
+            'ZZOrder Far Future',   // +60d
+            'ZZOrder Just Ended',   // -1d  — past, most recent of them first
+            'ZZOrder Long Past'     // -90d
+        ]);
+    });
+
+    it('orders every upcoming event ahead of every past one', async () => {
+        const res = await fetchAll();
+        const now = Date.now();
+        const positions = res.body.data.map((e, i) => ({
+            i, upcoming: new Date(e.startsAt).getTime() >= now
+        }));
+
+        const lastUpcoming = Math.max(...positions.filter(p => p.upcoming).map(p => p.i));
+        const firstPast = Math.min(...positions.filter(p => !p.upcoming).map(p => p.i));
+        expect(lastUpcoming).toBeLessThan(firstPast);
+    });
+
+    it('keeps past events in the list rather than filtering them out', async () => {
+        const names = (await fetchAll()).body.data.map(e => e.name);
+        expect(names).toContain('ZZOrder Just Ended');
+        expect(names).toContain('ZZOrder Long Past');
+    });
+
+    it('pages deterministically — every event seen exactly once', async () => {
+        const total = (await fetchAll()).body.total;
+
+        const seen = [];
+        for (let offset = 0; offset < total; offset++) {
+            const page = await request(app)
+                .get(`/organizer/events?limit=1&offset=${offset}`)
+                .set('Authorization', `Bearer ${orgAToken}`);
+            seen.push(page.body.data[0].id);
+        }
+
+        expect(seen.length).toBe(total);
+        expect(new Set(seen).size).toBe(total);   // no dupes, no drops
+    });
+
+});
+
+
 describe('GET /organizer/events/:id — detail and gross sales', () => {
 
     it('returns full detail with gross sales matching the sum of paid orders', async () => {

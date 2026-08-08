@@ -226,15 +226,9 @@ adminEventsRouter.post('/', async (req, res) => {
 
         await client.query('COMMIT');
 
-        const saved = await fetchEventCategories(event.id);
-        res.status(201).json({
-            event: {
-                ...toResponse(event),
-                categories: saved,
-                capacitySummary: buildCapacitySummary(saved),
-                priceRange: priceRange(saved)
-            }
-        });
+        // Same projection as GET, so a client can replace its state with
+        // this response without losing fields.
+        res.status(201).json({ event: await fetchAdminEventDetail(event.id) });
 
     } catch (err) {
         await client.query('ROLLBACK');
@@ -307,59 +301,75 @@ adminEventsRouter.get('/', async (req, res) => {
     }
 });
 
+/**
+ * THE admin event projection. Every endpoint that returns a single event —
+ * GET detail, create, and edit — goes through this one function.
+ *
+ * That is deliberate and structural. When create/edit built their own,
+ * narrower responses, a client that replaced its state with a PATCH response
+ * silently lost the gallery, the organizer and the categories: fields that had
+ * been on screen a moment earlier vanished on save. Sharing the serializer
+ * makes that class of bug unrepresentable rather than merely fixed.
+ *
+ * @returns {Promise<object|null>} the full event, or null when it doesn't exist
+ */
+async function fetchAdminEventDetail(eventId) {
+    const result = await pool.query(
+        `SELECT e.*, o.id AS org_id, o.email AS org_email, o.display_name AS org_display_name
+         FROM events e
+         LEFT JOIN organizers o ON o.id = e.organizer_id
+         WHERE e.id = $1`,
+        [eventId]
+    );
+
+    if (result.rows.length === 0) {
+        return null;
+    }
+
+    const row = result.rows[0];
+
+    const galleryResult = await pool.query(
+        'SELECT id, s3_key, position FROM event_photos WHERE event_id = $1 ORDER BY position ASC',
+        [eventId]
+    );
+
+    const allKeys = [row.banner_s3_key, ...galleryResult.rows.map(p => p.s3_key)].filter(Boolean);
+    const viewUrls = await getPhotoViewUrls(allKeys);
+
+    const categories = await fetchEventCategories(eventId);
+
+    return {
+        ...toResponse(row),
+        categories,
+        capacitySummary: buildCapacitySummary(categories),
+        priceRange: priceRange(categories),
+        bannerUrl: row.banner_s3_key ? viewUrls[row.banner_s3_key] : null,
+        // s3Key is exposed here (admin only) because PUT /gallery is a
+        // full replace — to keep an existing photo the admin has to
+        // send its key back. Consumer responses stay key-free.
+        gallery: galleryResult.rows.map(p => ({
+            id:       p.id,
+            s3Key:    p.s3_key,
+            url:      viewUrls[p.s3_key],
+            position: p.position
+        })),
+        organizer: row.org_id ? {
+            id:          row.org_id,
+            email:       row.org_email,
+            displayName: row.org_display_name
+        } : null
+    };
+}
+
 // GET /admin/events/:id
-// Full detail: banner + gallery (both presigned) + organizer.
+// Full detail: banner + gallery (both presigned) + organizer + categories.
 adminEventsRouter.get('/:id', async (req, res) => {
-    const { id } = req.params;
-
     try {
-        const result = await pool.query(
-            `SELECT e.*, o.id AS org_id, o.email AS org_email, o.display_name AS org_display_name
-             FROM events e
-             LEFT JOIN organizers o ON o.id = e.organizer_id
-             WHERE e.id = $1`,
-            [id]
-        );
-
-        if (result.rows.length === 0) {
+        const event = await fetchAdminEventDetail(req.params.id);
+        if (!event) {
             return res.status(404).json({ error: 'Event not found' });
         }
-
-        const row = result.rows[0];
-
-        const galleryResult = await pool.query(
-            'SELECT id, s3_key, position FROM event_photos WHERE event_id = $1 ORDER BY position ASC',
-            [id]
-        );
-
-        const allKeys = [row.banner_s3_key, ...galleryResult.rows.map(p => p.s3_key)].filter(Boolean);
-        const viewUrls = await getPhotoViewUrls(allKeys);
-
-        const categories = await fetchEventCategories(id);
-
-        res.json({
-            event: {
-                ...toResponse(row),
-                categories,
-                capacitySummary: buildCapacitySummary(categories),
-                priceRange: priceRange(categories),
-                bannerUrl: row.banner_s3_key ? viewUrls[row.banner_s3_key] : null,
-                // s3Key is exposed here (admin only) because PUT /gallery is a
-                // full replace — to keep an existing photo the admin has to
-                // send its key back. Consumer responses stay key-free.
-                gallery: galleryResult.rows.map(p => ({
-                    id:       p.id,
-                    s3Key:    p.s3_key,
-                    url:      viewUrls[p.s3_key],
-                    position: p.position
-                })),
-                organizer: row.org_id ? {
-                    id:          row.org_id,
-                    email:       row.org_email,
-                    displayName: row.org_display_name
-                } : null
-            }
-        });
+        res.json({ event });
 
     } catch (err) {
         console.error('GET /admin/events/:id error:', err.message);
@@ -524,15 +534,8 @@ adminEventsRouter.patch('/:id', async (req, res) => {
 
         await client.query('COMMIT');
 
-        const savedCategories = await fetchEventCategories(id);
-        res.json({
-            event: {
-                ...toResponse(after),
-                categories: savedCategories,
-                capacitySummary: buildCapacitySummary(savedCategories),
-                priceRange: priceRange(savedCategories)
-            }
-        });
+        // Same projection as GET — see fetchAdminEventDetail.
+        res.json({ event: await fetchAdminEventDetail(id) });
 
     } catch (err) {
         await client.query('ROLLBACK');
@@ -576,15 +579,31 @@ adminEventsRouter.post('/:id/image-url', async (req, res) => {
 });
 
 // PATCH /admin/events/:id/banner
+// Sets, replaces, or CLEARS the event banner.
+//
 // Verifies the object exists in S3 before saving — same all-or-nothing
 // pattern as profile photos.
+//
+// Clearing matches how the other image endpoints already work: the gallery
+// clears with photos: [], an artist photo with s3Key: null. Here, an explicit
+// null (or empty string) means remove; omitting the field entirely is still an
+// error, so a malformed body can never silently wipe a banner.
+//
+// Only the reference is nulled — the S3 object is left in place. This IAM
+// identity has no s3:DeleteObject permission, and orphaned objects are a
+// separate storage-cleanup concern; a dangling object costs pennies, whereas
+// deleting one still referenced elsewhere would break a live page.
 adminEventsRouter.patch('/:id/banner', async (req, res) => {
     const { id } = req.params;
     const { s3Key } = req.body;
 
-    if (!s3Key) {
-        return res.status(400).json({ error: 's3Key is required' });
+    if (s3Key === undefined) {
+        return res.status(400).json({ error: 's3Key is required (send null to clear the banner)' });
     }
+
+    // '' and null both mean "clear", so a form submitting an empty input
+    // behaves the same as an explicit null.
+    const nextKey = s3Key === null || s3Key === '' ? null : s3Key;
 
     const client = await pool.connect();
 
@@ -595,16 +614,18 @@ adminEventsRouter.patch('/:id/banner', async (req, res) => {
         }
         const before = eventCheck.rows[0];
 
-        const exists = await objectExists(s3Key);
-        if (!exists) {
-            return res.status(400).json({ error: 'The image was not uploaded successfully. Please try again.' });
+        if (nextKey !== null) {
+            const exists = await objectExists(nextKey);
+            if (!exists) {
+                return res.status(400).json({ error: 'The image was not uploaded successfully. Please try again.' });
+            }
         }
 
         await client.query('BEGIN');
 
         await client.query(
             'UPDATE events SET banner_s3_key = $1, updated_at = now() WHERE id = $2',
-            [s3Key, id]
+            [nextKey, id]
         );
 
         await recordAudit(client, {
@@ -612,12 +633,12 @@ adminEventsRouter.patch('/:id/banner', async (req, res) => {
             action: 'update',
             entityType: 'event',
             entityId: id,
-            changes: { banner_s3_key: { from: before.banner_s3_key, to: s3Key } }
+            changes: { banner_s3_key: { from: before.banner_s3_key, to: nextKey } }
         });
 
         await client.query('COMMIT');
 
-        const bannerUrl = await getPhotoViewUrl(s3Key);
+        const bannerUrl = nextKey ? await getPhotoViewUrl(nextKey) : null;
         res.json({ bannerUrl });
 
     } catch (err) {

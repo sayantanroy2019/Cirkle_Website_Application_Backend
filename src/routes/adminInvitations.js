@@ -2,6 +2,7 @@ import express from 'express';
 import { pool } from '../config/db.js';
 import authenticateAdmin from '../middlewares/authenticateAdmin.js';
 import { parsePagination, paginatedResponse } from '../utils/pagination.js';
+import { userContactFor } from '../utils/adminPii.js';
 
 const adminInvitationsRouter = express.Router();
 
@@ -12,7 +13,7 @@ const ALLOWED_STATUSES = ['pending', 'accepted', 'rejected'];
 // (own-events-only) version of this.
 adminInvitationsRouter.use(authenticateAdmin);
 
-function toResponse(row) {
+function toResponse(row, admin) {
     return {
         id:        row.id,
         status:    row.status,
@@ -26,13 +27,14 @@ function toResponse(row) {
             id:   row.organizer_id,
             name: row.organizer_name
         } : null,
-        // PII: phone included for context — see the PII note in adminUsers.js.
+        // PII: phone included for context, role-gated via userContactFor() —
+        // real for administrative, masked for BD.
         user: {
             id:        row.user_id,
             firstName: row.user_first_name,
             age:       row.user_age,
             gender:    row.user_gender,
-            phone:     row.user_phone
+            ...userContactFor(admin, { phone: row.user_phone })
         }
     };
 }
@@ -79,7 +81,7 @@ adminInvitationsRouter.get('/', async (req, res) => {
             [...values, limit, offset]
         );
 
-        res.json(paginatedResponse(dataResult.rows.map(toResponse), countResult.rows[0].count, limit, offset));
+        res.json(paginatedResponse(dataResult.rows.map(r => toResponse(r, req.admin)), countResult.rows[0].count, limit, offset));
 
     } catch (err) {
         console.error('GET /admin/invitations error:', err.message);

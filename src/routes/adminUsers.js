@@ -3,6 +3,7 @@ import { pool } from '../config/db.js';
 import authenticateAdmin from '../middlewares/authenticateAdmin.js';
 import { getPhotoViewUrls } from '../utils/s3.js';
 import { parsePagination, paginatedResponse } from '../utils/pagination.js';
+import { userContactFor } from '../utils/adminPii.js';
 
 const adminUsersRouter = express.Router();
 
@@ -10,12 +11,15 @@ const adminUsersRouter = express.Router();
 adminUsersRouter.use(authenticateAdmin);
 
 // ── PII ──────────────────────────────────────────────────────────────────
-// phone and email are sensitive PII. They are returned in full to every
-// admin for now (no masking implemented in this part). All raw exposure of
-// these two fields is funneled through the two functions below — when a
-// view_pii capability is added later, masking gets added in exactly these
-// two places, not scattered across every route in this file.
-function serializeUserSummary(row) {
+// phone and email are sensitive end-user PII. Exposure is role-gated: an
+// administrative admin holds view_pii and sees the real values; a
+// business_development admin sees masked ones, produced server-side by
+// userContactFor() so the real value never enters the response at all.
+//
+// Both serializers take the requesting admin. That parameter is not optional
+// by accident — it is what makes it impossible to serialize a user without
+// having decided who is allowed to see them.
+function serializeUserSummary(row, admin) {
     return {
         id:          row.id,
         firstName:   row.first_name,
@@ -23,15 +27,14 @@ function serializeUserSummary(row) {
         age:         row.age,
         gender:      row.gender,
         cityId:      row.city_id,
-        phone:       row.phone,  // PII
-        email:       row.email,  // PII
+        ...userContactFor(admin, { phone: row.phone, email: row.email }),
         createdAt:   row.created_at,
         ticketCount: parseInt(row.ticket_count, 10),
         orderCount:  parseInt(row.order_count, 10)
     };
 }
 
-function serializeUserDetail(row, { photos, lifestyleTags }) {
+function serializeUserDetail(row, { photos, lifestyleTags }, admin) {
     return {
         id:        row.id,
         firstName: row.first_name,
@@ -39,8 +42,7 @@ function serializeUserDetail(row, { photos, lifestyleTags }) {
         age:       row.age,
         gender:    row.gender,
         cityId:    row.city_id,
-        phone:     row.phone,  // PII
-        email:     row.email,  // PII
+        ...userContactFor(admin, { phone: row.phone, email: row.email }),
         bio:       row.bio,
         tagline:   row.tagline,
         photos,
@@ -94,7 +96,7 @@ adminUsersRouter.get('/', async (req, res) => {
             [...values, limit, offset]
         );
 
-        res.json(paginatedResponse(dataResult.rows.map(serializeUserSummary), countResult.rows[0].count, limit, offset));
+        res.json(paginatedResponse(dataResult.rows.map(r => serializeUserSummary(r, req.admin)), countResult.rows[0].count, limit, offset));
 
     } catch (err) {
         console.error('GET /admin/users error:', err.message);
@@ -169,7 +171,7 @@ adminUsersRouter.get('/:id', async (req, res) => {
                 ...serializeUserDetail(row, {
                     photos,
                     lifestyleTags: tagsResult.rows.map(t => ({ id: t.id, label: t.label, category: t.category }))
-                }),
+                }, req.admin),
                 orders: ordersResult.rows.map(o => ({
                     id:         o.id,
                     status:     o.status,

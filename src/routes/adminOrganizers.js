@@ -25,6 +25,30 @@ function toResponse(row) {
     };
 }
 
+/**
+ * THE admin organizer projection — used by GET detail, create and edit alike.
+ *
+ * eventCount lives here rather than in the INSERT/UPDATE RETURNING clauses
+ * because it is an aggregate, not a column. Before this, create and edit
+ * returned an organizer WITHOUT it, so a client replacing its state with a
+ * PATCH response saw the event count silently disappear from the row it had
+ * just edited.
+ *
+ * @returns {Promise<object|null>}
+ */
+async function fetchOrganizerDetail(organizerId) {
+    const result = await pool.query(
+        `SELECT o.id, o.email, o.display_name, o.instagram, o.is_active, o.created_at,
+                COUNT(e.id) AS event_count
+         FROM organizers o
+         LEFT JOIN events e ON e.organizer_id = o.id
+         WHERE o.id = $1
+         GROUP BY o.id`,
+        [organizerId]
+    );
+    return result.rows.length > 0 ? toResponse(result.rows[0]) : null;
+}
+
 // POST /admin/organizers
 // Onboards a new organizer — admin creates the account, then hands the
 // organizer their credentials out of band.
@@ -86,7 +110,8 @@ adminOrganizersRouter.post('/', async (req, res) => {
 
         await client.query('COMMIT');
 
-        res.status(201).json({ organizer: toResponse(organizer) });
+        // Same projection as GET, eventCount included.
+        res.status(201).json({ organizer: await fetchOrganizerDetail(organizer.id) });
 
     } catch (err) {
         await client.query('ROLLBACK');
@@ -122,21 +147,12 @@ adminOrganizersRouter.get('/:id', async (req, res) => {
     const { id } = req.params;
 
     try {
-        const result = await pool.query(
-            `SELECT o.id, o.email, o.display_name, o.instagram, o.is_active, o.created_at,
-                    COUNT(e.id) AS event_count
-             FROM organizers o
-             LEFT JOIN events e ON e.organizer_id = o.id
-             WHERE o.id = $1
-             GROUP BY o.id`,
-            [id]
-        );
-
-        if (result.rows.length === 0) {
+        const organizer = await fetchOrganizerDetail(id);
+        if (!organizer) {
             return res.status(404).json({ error: 'Organizer not found' });
         }
 
-        res.json({ organizer: toResponse(result.rows[0]) });
+        res.json({ organizer });
 
     } catch (err) {
         console.error('GET /admin/organizers/:id error:', err.message);
@@ -260,7 +276,8 @@ adminOrganizersRouter.patch('/:id', async (req, res) => {
 
         await client.query('COMMIT');
 
-        res.json({ organizer: toResponse(after) });
+        // Same projection as GET — see fetchOrganizerDetail.
+        res.json({ organizer: await fetchOrganizerDetail(after.id) });
 
     } catch (err) {
         await client.query('ROLLBACK');

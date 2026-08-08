@@ -359,6 +359,104 @@ describe('Event images — banner and gallery', () => {
         await pool.query("DELETE FROM users WHERE phone = '+916868686869'");
     });
 
+    // B6 — the banner has a clear path, matching how the gallery clears with
+    // photos: [] and an artist photo with s3Key: null.
+    it('clears the banner with s3Key null, and reports bannerUrl null', async () => {
+        const key = await uploadTestImage(eventId, 'banner');
+        await request(app)
+            .patch(`/admin/events/${eventId}/banner`)
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ s3Key: key });
+
+        const cleared = await request(app)
+            .patch(`/admin/events/${eventId}/banner`)
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ s3Key: null });
+        expect(cleared.status).toBe(200);
+        expect(cleared.body.bannerUrl).toBeNull();
+
+        // The column really is null, not an empty string.
+        const stored = await pool.query('SELECT banner_s3_key FROM events WHERE id = $1', [eventId]);
+        expect(stored.rows[0].banner_s3_key).toBeNull();
+
+        // And the detail endpoint agrees.
+        const detail = await request(app)
+            .get(`/admin/events/${eventId}`)
+            .set('Authorization', `Bearer ${adminToken}`);
+        expect(detail.body.event.bannerUrl).toBeNull();
+    });
+
+    it('treats an empty string the same as null', async () => {
+        const key = await uploadTestImage(eventId, 'banner');
+        await request(app)
+            .patch(`/admin/events/${eventId}/banner`)
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ s3Key: key });
+
+        const cleared = await request(app)
+            .patch(`/admin/events/${eventId}/banner`)
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ s3Key: '' });
+        expect(cleared.status).toBe(200);
+        expect(cleared.body.bannerUrl).toBeNull();
+    });
+
+    // Only an EXPLICIT null clears — a body that forgot the field must not
+    // silently wipe the banner.
+    it('still 400s when s3Key is absent entirely, leaving the banner intact', async () => {
+        const key = await uploadTestImage(eventId, 'banner');
+        await request(app)
+            .patch(`/admin/events/${eventId}/banner`)
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ s3Key: key });
+
+        const res = await request(app)
+            .patch(`/admin/events/${eventId}/banner`)
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({});
+        expect(res.status).toBe(400);
+
+        const stored = await pool.query('SELECT banner_s3_key FROM events WHERE id = $1', [eventId]);
+        expect(stored.rows[0].banner_s3_key).toBe(key);
+    });
+
+    it('can set a banner again after clearing', async () => {
+        await request(app)
+            .patch(`/admin/events/${eventId}/banner`)
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ s3Key: null });
+
+        const key = await uploadTestImage(eventId, 'banner');
+        const res = await request(app)
+            .patch(`/admin/events/${eventId}/banner`)
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ s3Key: key });
+        expect(res.status).toBe(200);
+        expect(res.body.bannerUrl).toMatch(/^https:\/\//);
+    });
+
+    it('audits a clear as a from/to ending in null', async () => {
+        const key = await uploadTestImage(eventId, 'banner');
+        await request(app)
+            .patch(`/admin/events/${eventId}/banner`)
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ s3Key: key });
+
+        await request(app)
+            .patch(`/admin/events/${eventId}/banner`)
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ s3Key: null });
+
+        const audit = await pool.query(
+            `SELECT changes FROM audit_log
+             WHERE entity_type = 'event' AND entity_id = $1 AND changes ? 'banner_s3_key'
+             ORDER BY created_at DESC LIMIT 1`,
+            [eventId]
+        );
+        expect(audit.rows[0].changes.banner_s3_key.from).toBe(key);
+        expect(audit.rows[0].changes.banner_s3_key.to).toBeNull();
+    });
+
     it('admin detail exposes each gallery item s3Key, matching the stored key', async () => {
         const res = await request(app)
             .get(`/admin/events/${eventId}`)

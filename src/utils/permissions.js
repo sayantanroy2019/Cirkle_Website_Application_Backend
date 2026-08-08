@@ -1,8 +1,11 @@
 // Capability map for admin roles. Endpoints check capabilities via can(),
 // never role names directly — so future role/permission changes happen in
 // this one map, not scattered across every endpoint.
+// view_pii — see end-users' real phone and email. Administrative only;
+// business_development receives masked values instead (src/utils/adminPii.js).
+// It covers END-USER contact details, not staff login identities.
 const PERMISSIONS = {
-    administrative:        ['manage_admins', 'manage_organizers', 'manage_events', 'view_all', 'refunds', 'manage_reference'],
+    administrative:        ['manage_admins', 'view_pii', 'manage_organizers', 'manage_events', 'view_all', 'refunds', 'manage_reference'],
     business_development:  ['manage_organizers', 'manage_events', 'view_all', 'refunds', 'manage_reference']
 };
 
